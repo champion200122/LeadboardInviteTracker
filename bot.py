@@ -8,8 +8,8 @@ from aiogram.filters import Command
 from datetime import datetime
 
 # ================= КОНФИГУРАЦИЯ =================
-API_TOKEN = 'ВАШ_ТОКЕН_ОТ_BOTFATHER'
-GROUP_ID = -1001234567890  # ID вашей группы
+API_TOKEN = '8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg'
+GROUP_ID = -1003726194322  # ID вашей группы
 ADMIN_ID = 123456789  # ID админа (ваш ID)
 # ===============================================
 

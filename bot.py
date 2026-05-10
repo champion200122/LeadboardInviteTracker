@@ -10,7 +10,7 @@ from datetime import datetime
 # ================= КОНФИГУРАЦИЯ =================
 API_TOKEN = '8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg'
 GROUP_ID = -1003726194322  # ID вашей группы
-ADMIN_ID = 123456789  # ID админа (ваш ID)
+ADMIN_ID = 827744412  # ID админа (ваш ID)
 # ===============================================
 
 app = Flask(__name__)

@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
 # ================= КОНФИГУРАЦИЯ =================
-API_TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg"  # Вставь токен бота
+API_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"  # Вставь токен бота
 # ===============================================
 
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +23,16 @@ dp = Dispatcher()
 def init_db():
     conn = sqlite3.connect("invites.db")
     cursor = conn.cursor()
+
+    # Таблица настроек (для сохранения group_id и т.п.)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
 
     # Пользователи
     cursor.execute(
@@ -55,6 +65,26 @@ def init_db():
     conn.close()
 
 
+def get_setting(key, default=None):
+    conn = sqlite3.connect("invites.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else default
+
+
+def set_setting(key, value):
+    conn = sqlite3.connect("invites.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
 def add_user(user_id, username):
     conn = sqlite3.connect("invites.db")
     cursor = conn.cursor()
@@ -71,24 +101,30 @@ def add_user(user_id, username):
 
 
 def increment_invites(inviter_id, invited_user_id, invited_username):
-    """Увеличивает счётчик инвайтов с защитой от накрутки.
-    Возвращает True если засчитано, False если отклонено."""
+    """Увеличивает счётчик инвайтов с защитой от накрутки."""
     conn = sqlite3.connect("invites.db")
     cursor = conn.cursor()
 
-    # 1) Нельзя приглашать самого себя
+    required_group_id = get_setting("required_group_id", None)
+    
+    # Проверка 1: нельзя приглашать самого себя
     if inviter_id == invited_user_id:
         conn.close()
         return False
 
-    # 2) Этот человек уже был приглашён кем-то ранее
+    # Если группа не настроена — игнорируем инвайт
+    if not required_group_id:
+        conn.close()
+        return False
+
+    # Проверка 2: этот человек уже был приглашён кем-то ранее
     cursor.execute("SELECT invited_by FROM users WHERE user_id = ?", (invited_user_id,))
     row = cursor.fetchone()
     if row and row[0] is not None:
         conn.close()
         return False
 
-    # 3) Этот пригласивший уже приглашал этого человека ранее (лог)
+    # Проверка 3: этот пригласивший уже приглашал этого человека ранее (лог)
     cursor.execute(
         "SELECT id FROM invite_logs WHERE inviter_id = ? AND invited_user_id = ?",
         (inviter_id, invited_user_id),
@@ -190,10 +226,22 @@ def get_invite_logs(limit=50):
 
 
 async def is_chat_admin(chat_id: int, user_id: int) -> bool:
-    """Проверка, что пользователь — админ/создатель чата (работает в группах/супергруппах)."""
+    """Проверка, что пользователь — админ/создатель чата."""
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+async def check_user_in_required_group(user_id: int) -> bool:
+    """Проверяет, состоит ли пользователь в требуемой группе."""
+    required_group_id = get_setting("required_group_id", None)
+    if not required_group_id:
+        return False  # Группа не настроена
+    try:
+        member = await bot.get_chat_member(required_group_id, user_id)
+        return member.status in ("member", "administrator", "creator")
     except Exception:
         return False
 
@@ -211,6 +259,15 @@ async def cmd_start(message: types.Message):
     if len(args) > 1:
         try:
             inviter_id = int(args[1])
+
+            # Проверяем, что пользователь в нужной группе
+            if not await check_user_in_required_group(user_id):
+                await message.answer(
+                    "❌ Вы должны состоять в нашей группе, чтобы зачесть инвайт."
+                )
+                return
+
+            # Увеличиваем счётчик инвайтов
             success = increment_invites(inviter_id, user_id, username)
             if success:
                 try:
@@ -220,6 +277,11 @@ async def cmd_start(message: types.Message):
                     )
                 except Exception:
                     pass
+            else:
+                await message.answer(
+                    "❌ Этот человек уже был приглашён ранее или вы уже приглашали его.",
+                    parse_mode="Markdown",
+                )
         except ValueError:
             pass
 
@@ -244,7 +306,7 @@ async def cmd_getlink(message: types.Message):
 
     await message.answer(
         f"Ваша инвайт-ссылка:\n`{invite_link}`\n\n"
-        "Отправьте её друзьям. (Нельзя приглашать самого себя; один человек — один инвайт)",
+        "Отправьте её друзьям. Они должны вступить в нашу группу, чтобы засчитался инвайт!",
         parse_mode="Markdown",
     )
 
@@ -281,12 +343,64 @@ async def cmd_help(message: types.Message):
         "/addinvites @user N — (админы чата) добавить инвайты\n"
         "/removeinvites @user N — (админы чата) убрать инвайты\n"
         "/setinvites @user N — (админы чата) установить инвайты\n"
+        "/setgroup — (админы чата) определить текущую группу как нужную\n"
+        "/statusgroup — проверить статус настройки группы\n"
         "/help — Помощь\n\n"
         "⚠️ Правила:\n"
         "• Нельзя приглашать самого себя\n"
         "• Один человек засчитывается только один раз\n"
-        "• Инвайт засчитывается по /start <ваш_id>",
+        "• Человек должен быть в нужной группе, чтобы засчитался инвайт\n"
+        "• Админ должен назначить нужную группу командой /setgroup",
     )
+
+
+# ================= АДМИНСКИЕ КОМАНДЫ =================
+@dp.message(Command("setgroup"))
+async def cmd_setgroup(message: types.Message):
+    """Назначить текущую группу как нужную. Только админы чата."""
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("❌ Команда доступна только в группе (для админов).")
+        return
+
+    if not await is_chat_admin(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы группы могут использовать эту команду.")
+        return
+
+    # Сохраняем ID группы
+    set_setting("required_group_id", str(message.chat.id))
+
+    await message.answer(
+        f"✅ Текущая группа установлена как нужная!\n"
+        f"ID группы: `{message.chat.id}`\n"
+        f"Теперь инвайты будут засчитываться только если человек вступит в эту группу.",
+        parse_mode="Markdown",
+    )
+
+
+@dp.message(Command("statusgroup"))
+async def cmd_statusgroup(message: types.Message):
+    """Проверить текущий статус настройки группы."""
+    required_group_id = get_setting("required_group_id", None)
+
+    if not required_group_id:
+        await message.answer(
+            "❓ Нужная группа не назначена.\n\n"
+            "Используйте команду `/setgroup` в нужной группе, чтобы назначить её.",
+        )
+        return
+
+    try:
+        # Проверяем, существует ли группа
+        group_info = await bot.get_chat(int(required_group_id))
+        group_title = getattr(group_info, 'title', f'Чат {required_group_id}')
+        await message.answer(
+            f"✅ Нужная группа назначена!\n\n"
+            f"Название: `{group_title}`\n"
+            f"ID: `{required_group_id}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await message.answer(f"⚠️ Группа не найдена или недоступна: {e}")
 
 
 @dp.message(Command("logs"))
@@ -340,7 +454,9 @@ async def cmd_addinvites(message: types.Message):
 
         target = get_user_by_username(username)
         if not target:
-            await message.answer(f"❌ Пользователь @{username} не найден. Он должен хотя бы один раз запустить бота (/start).")
+            await message.answer(
+                f"❌ Пользователь @{username} не найден. Он должен хотя бы раз запустить бота (/start)."
+            )
             return
 
         target_id, target_username_db, current = target
@@ -379,7 +495,9 @@ async def cmd_removeinvites(message: types.Message):
 
         target = get_user_by_username(username)
         if not target:
-            await message.answer(f"❌ Пользователь @{username} не найден. Он должен хотя бы один раз запустить бота (/start).")
+            await message.answer(
+                f"❌ Пользователь @{username} не найден. Он должен хотя бы раз запустить бота (/start)."
+            )
             return
 
         target_id, target_username_db, current = target
@@ -418,7 +536,9 @@ async def cmd_setinvites(message: types.Message):
 
         target = get_user_by_username(username)
         if not target:
-            await message.answer(f"❌ Пользователь @{username} не найден. Он должен хотя бы один раз запустить бота (/start).")
+            await message.answer(
+                f"❌ Пользователь @{username} не найден. Он должен хотя бы раз запустить бота (/start)."
+            )
             return
 
         target_id, target_username_db, current = target

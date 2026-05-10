@@ -7,8 +7,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ================= КОНФИГУРАЦИЯ =================
-API_TOKEN = 'ВАШ_ТОКЕН_ОТ_BOTFATHER'  # Вставьте сюда токен бота
-GROUP_ID = -1001234567890  # ID вашей группы
+API_TOKEN = '8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg'  # Вставьте сюда токен бота
+GROUP_ID = -1003726194322  # ID вашей группы
 # ===============================================
 
 # Настройка логирования

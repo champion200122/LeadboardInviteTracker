@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
 # ================= КОНФИГУРАЦИЯ =================
-API_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"  # Вставь токен бота
+API_TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg"  # Вставь токен бота
 # ===============================================
 
 logging.basicConfig(level=logging.INFO)

@@ -123,6 +123,42 @@ def get_user_invites(user_id):
     return result[0] if result else 0
 
 
+def get_user_by_username(username: str):
+    conn = sqlite3.connect("invites.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username, invite_count FROM users WHERE username = ?", (username,))
+    result = cursor.fetchone()
+    conn.close()
+    return result  # (user_id, username, invite_count) или None
+
+
+def set_user_invites(user_id: int, new_count: int):
+    conn = sqlite3.connect("invites.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET invite_count = ? WHERE user_id = ?", (max(0, new_count), user_id))
+    conn.commit()
+    conn.close()
+
+
+def add_user_invites(user_id: int, delta: int):
+    conn = sqlite3.connect("invites.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET invite_count = invite_count + ? WHERE user_id = ?", (delta, user_id))
+    conn.commit()
+    conn.close()
+
+
+def log_manual_action(admin_id: int, target_user_id: int, target_username: str, action: str, delta_or_value: str):
+    conn = sqlite3.connect("invites.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO invite_logs (inviter_id, invited_user_id, invited_username, timestamp, status) VALUES (?, ?, ?, ?, ?)",
+        (admin_id, target_user_id, target_username, datetime.now(), action + ":" + str(delta_or_value)),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_leaderboard(limit=10):
     conn = sqlite3.connect("invites.db")
     cursor = conn.cursor()
@@ -184,7 +220,6 @@ async def cmd_start(message: types.Message):
                     )
                 except Exception:
                     pass
-            # Если не success — просто молча не засчитываем (самозайм/повтор/уже приглашён)
         except ValueError:
             pass
 
@@ -242,19 +277,21 @@ async def cmd_help(message: types.Message):
         "/getlink — Получить свою инвайт-ссылку\n"
         "/myinvites — Посмотреть свои инвайты\n"
         "/leaderboard — Топ-10 по инвайтам\n"
-        "/logs — (только админам чата) логи инвайтов\n"
+        "/logs — (админы чата) логи инвайтов\n"
+        "/addinvites @user N — (админы чата) добавить инвайты\n"
+        "/removeinvites @user N — (админы чата) убрать инвайты\n"
+        "/setinvites @user N — (админы чата) установить инвайты\n"
         "/help — Помощь\n\n"
         "⚠️ Правила:\n"
         "• Нельзя приглашать самого себя\n"
         "• Один человек засчитывается только один раз\n"
-        "• Инвайт засчитывается, когда человек переходит по вашей ссылке и запускает бота (/start <ваш_id>)",
+        "• Инвайт засчитывается по /start <ваш_id>",
     )
 
 
 @dp.message(Command("logs"))
 async def cmd_logs(message: types.Message):
     """Логи инвайтов. Доступ только администраторам/создателю чата, где вызвана команда."""
-    # Разрешаем только в группах/супергруппах, где вызывающий — админ/создатель
     if message.chat.type not in ("group", "supergroup"):
         await message.answer("❌ Команда /logs доступна только в группе (для админов).")
         return
@@ -274,9 +311,127 @@ async def cmd_logs(message: types.Message):
         invited_name = f"@{invited_username}" if invited_username else str(invited_user_id)
         text += f"👤 {inviter_name} → {invited_name}\n"
         text += f"   🕒 {timestamp}\n"
-        text += f"   ✅ {status}\n\n"
+        text += f"   🧾 {status}\n\n"
 
     await message.answer(text, parse_mode="Markdown")
+
+
+# ============ АДМИН-КОМАНДЫ УПРАВЛЕНИЯ ИНВАЙТАМИ ============
+
+@dp.message(Command("addinvites"))
+async def cmd_addinvites(message: types.Message):
+    """Добавить инвайты пользователю. Только админы чата."""
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("❌ Команда доступна только в группе (для админов).")
+        return
+
+    if not await is_chat_admin(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы группы могут использовать эту команду.")
+        return
+
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            await message.answer("❌ Использование: /addinvites @username 5")
+            return
+
+        username = args[1].lstrip("@")
+        delta = int(args[2])
+
+        target = get_user_by_username(username)
+        if not target:
+            await message.answer(f"❌ Пользователь @{username} не найден. Он должен хотя бы один раз запустить бота (/start).")
+            return
+
+        target_id, target_username_db, current = target
+        add_user_invites(target_id, delta)
+        new_count = get_user_invites(target_id)
+
+        log_manual_action(message.from_user.id, target_id, target_username_db or username, "manual_add", delta)
+
+        await message.answer(f"✅ Добавлено {delta} инвайтов @{username}. Теперь у него {new_count} инвайтов.")
+    except ValueError:
+        await message.answer("❌ Количество должно быть целым числом. Пример: /addinvites @username 5")
+    except Exception as e:
+        logging.exception(e)
+        await message.answer("❌ Ошибка при выполнении команды.")
+
+
+@dp.message(Command("removeinvites"))
+async def cmd_removeinvites(message: types.Message):
+    """Убрать инвайты у пользователя. Только админы чата."""
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("❌ Команда доступна только в группе (для админов).")
+        return
+
+    if not await is_chat_admin(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы группы могут использовать эту команду.")
+        return
+
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            await message.answer("❌ Использование: /removeinvites @username 2")
+            return
+
+        username = args[1].lstrip("@")
+        delta = int(args[2])
+
+        target = get_user_by_username(username)
+        if not target:
+            await message.answer(f"❌ Пользователь @{username} не найден. Он должен хотя бы один раз запустить бота (/start).")
+            return
+
+        target_id, target_username_db, current = target
+        add_user_invites(target_id, -delta)
+        new_count = get_user_invites(target_id)
+
+        log_manual_action(message.from_user.id, target_id, target_username_db or username, "manual_remove", delta)
+
+        await message.answer(f"✅ Убрано {delta} инвайтов у @{username}. Теперь у него {new_count} инвайтов.")
+    except ValueError:
+        await message.answer("❌ Количество должно быть целым числом. Пример: /removeinvites @username 2")
+    except Exception as e:
+        logging.exception(e)
+        await message.answer("❌ Ошибка при выполнении команды.")
+
+
+@dp.message(Command("setinvites"))
+async def cmd_setinvites(message: types.Message):
+    """Установить точное количество инвайтов пользователю. Только админы чата."""
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("❌ Команда доступна только в группе (для админов).")
+        return
+
+    if not await is_chat_admin(message.chat.id, message.from_user.id):
+        await message.answer("❌ Только администраторы группы могут использовать эту команду.")
+        return
+
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            await message.answer("❌ Использование: /setinvites @username 10")
+            return
+
+        username = args[1].lstrip("@")
+        new_count = int(args[2])
+
+        target = get_user_by_username(username)
+        if not target:
+            await message.answer(f"❌ Пользователь @{username} не найден. Он должен хотя бы один раз запустить бота (/start).")
+            return
+
+        target_id, target_username_db, current = target
+        set_user_invites(target_id, new_count)
+
+        log_manual_action(message.from_user.id, target_id, target_username_db or username, "manual_set", new_count)
+
+        await message.answer(f"✅ Установлено {new_count} инвайтов для @{username}.")
+    except ValueError:
+        await message.answer("❌ Количество должно быть целым числом. Пример: /setinvites @username 10")
+    except Exception as e:
+        logging.exception(e)
+        await message.answer("❌ Ошибка при выполнении команды.")
 
 
 # ================= ВЕБ-СЕРВЕР (для Render) =================

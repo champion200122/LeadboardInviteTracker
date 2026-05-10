@@ -177,3 +177,22 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"message": "Bot is running!"}
+
+@app.get("/ping")
+async def ping():
+    return {"message": "pong"}
+
+async def run_polling():
+    init_db()
+    await dp.start_polling(bot, skip_updates=True)
+
+# Запускаем бота в фоне
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(run_polling())

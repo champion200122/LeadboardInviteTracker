@@ -10,9 +10,9 @@ from aiohttp import web
 
 # ------------------------------------------------------------------
 # Конфигурация из переменных окружения
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-BS_API_TOKEN = os.getenv("BS_API_TOKEN")
-BASE_URL = os.getenv("BASE_URL")          # например https://your-bot.onrender.com
+BOT_TOKEN = os.getenv("8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg")
+BS_API_TOKEN = os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk3NDVhOTdkLWI1NjUtNDZjNi1hYjk2LWQyNzA4ZTYwYzY0ZCIsImlhdCI6MTc3ODUxMTE0OCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMC4wLjAuMCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.e5A40jmtz88Zx4lzrLQADT3HaABHAdos5gbpZpgoc8hXS41lnVSEOLgSqAJIWxC0a_28xBTDm2eTKOrADM2K9A")
+BASE_URL = os.getenv("https://leadboardinvitetracker.onrender.com")          # например https://your-bot.onrender.com
 PORT = int(os.getenv("PORT", 8080))       # Render сам задаёт порт
 CHECK_INTERVAL = 900                      # 15 минут между проверками (в секундах)
 PING_INTERVAL = 600                       # 10 минут самопинга

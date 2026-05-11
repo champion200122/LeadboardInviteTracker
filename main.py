@@ -11,7 +11,7 @@ from aiohttp import web
 # ------------------------------------------------------------------
 # ⚙️ КОНФИГУРАЦИЯ
 BOT_TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg"
-BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk4Y2Q3NzViLThjZTYtNGNjMy1iNDc3LTA3YmQxZDAzOTNkNiIsImlhdCI6MTc3ODUxNjUwNCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiNzQuMjIwLjQ4LjIzNSJdLCJ0eXBlIjoiY2xpZW50In1dfQ.Z4_SyqzVyzAiUiLfUTorcEcgq8YOJWPWgYxsxxMfwp3pX4BcsFBSAhekIjafQi66KKlAJWk2ehNtllIH48Mthw"
+BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6IjBkNGFjZDMzLTU2NWYtNDQ0Ni04OWM0LWNlZjYzMDIwYzE0MSIsImlhdCI6MTc3ODUyMjMyNSwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMTI4LjEyOC4xMjguMTI4Il0sInR5cGUiOiJjbGllbnQifV19.S3BnJs26o89lH9sRvdaTF_EldGce_vX4rwqanplYHPIBvFhCMhdDn1o196Xvs6RdhDnOhGmbtYre2sSPStDcoA"
 BASE_URL = "https://leadboardinvitetracker.onrender.com"
 PORT = int(os.getenv("PORT", 8080))
 
@@ -60,7 +60,7 @@ async def is_admin(message: Message) -> bool:
 # ------------------------------------------------------------------
 # 🌐 BRAWL STARS API
 async def bs_api(path: str):
-    url = f"https://api.brawlstars.com/v1{path}"
+    url = f"https://bsproxy.royaleapi.dev/v1{path}"
     headers = {"Authorization": f"Bearer {BS_API_TOKEN}"}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:

@@ -5,13 +5,13 @@ import aiohttp
 from urllib.parse import quote
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, ChatMemberAdministrator
+from aiogram.types import Message
 from aiohttp import web
 
 # ------------------------------------------------------------------
 # ⚙️ КОНФИГУРАЦИЯ
 BOT_TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg"
-BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk4Y2Q3NzViLThjZTYtNGNjMy1iNDc3LTA3YmQxZDAzOTNkNiIsImlhdCI6MTc3ODUxNjUwNCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiNzQuMjIwLjQ4LjIzNSJdLCJ0eXBlIjoiY2xpZW50In1dfQ.Z4_SyqzVyzAiUiLfUTorcEcgq8YOJWPWgYxsxxMfwp3pX4BcsFBSAhekIjafQi66KKlAJWk2ehNtllIH48Mthw"
+BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk3NDVhOTdkLWI1NjUtNDZjNi1hYjk2LWQyNzA4ZTYwYzY0ZCIsImlhdCI6MTc3ODUxMTE0OCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMC4wLjAuMCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.e5A40jmtz88Zx4lzrLQADT3HaABHAdos5gbpZpgoc8hXS41lnVSEOLgSqAJIWxC0a_28xBTDm2eTKOrADM2K9A"
 BASE_URL = "https://leadboardinvitetracker.onrender.com"
 PORT = int(os.getenv("PORT", 8080))
 
@@ -23,7 +23,7 @@ dp = Dispatcher()
 DATA_FILE = "clubs_data.json"
 
 # ------------------------------------------------------------------
-# 💾 БАЗА ДАННЫХ (Теперь храним по ЧАТУ, не по ЮЗЕРУ)
+# 💾 БАЗА ДАННЫХ (Храним по ID чата)
 def load_data():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f: return json.load(f)
@@ -33,20 +33,22 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
 
 # ------------------------------------------------------------------
-# 🛡️ ПРОВЕРКА АДМИНИСТРАТОРА
+# 🛡️ ИСПРАВЛЕННАЯ ПРОВЕРКА АДМИНИСТРАТОРА
 async def is_admin(message: Message) -> bool:
+    # В личке юзер всегда админ сам себе
     if message.chat.type == 'private':
-        return True  # В личных сообщениях все считаются админами
+        return True  
     try:
         member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-        return member.is_administrator or member.status == 'creator'
-    except:
+        # В aiogram 3 статус это строка: 'creator' или 'administrator'
+        return member.status in ['creator', 'administrator']
+    except Exception as e:
+        print(f"Ошибка проверки прав: {e}")
         return False
 
 # ------------------------------------------------------------------
 # 🌐 BRAWL STARS API
 async def bs_api(path: str):
-    """Запрос к официальному API. Возвращает (данные, статус_код)"""
     url = f"https://api.brawlstars.com/v1{path}"
     headers = {"Authorization": f"Bearer {BS_API_TOKEN}"}
     async with aiohttp.ClientSession() as session:
@@ -65,14 +67,14 @@ def enc(tag: str):
 async def cmd_start(message: Message):
     if not await is_admin(message):
         return await message.answer(
-            "👋 Привет! Этот бот мониторинга клубов.\n\n"
-            "/clubsinfo — посмотреть информацию о клубах этого чата",
+            "👋 Привет! Я бот мониторинга клубов.\n\n"
+            "Используй `/clubsinfo` — посмотреть информацию о клубах этого чата",
             parse_mode="Markdown"
         )
     
     await message.answer(
         "👋 Привет, админ! Я мониторю клубы Brawl Stars для этого чата.\n\n"
-        "⚠️ *ВАЖНО:* Напиши `/getip` один раз и добавь IP на developer.brawlstars.com\n\n"
+        "⚠️ *ВАЖНО:* Напиши `/getip` и добавь IP на developer.brawlstars.com\n\n"
         "*Команды для Админов:*\n"
         "/addclub `#ТЕГ` — добавить клуб в мониторинг\n"
         "/removeclub `#ТЕГ` — удалить клуб из мониторинга\n"
@@ -86,7 +88,7 @@ async def cmd_start(message: Message):
 @dp.message(Command("getip"))
 async def cmd_getip(message: Message):
     if not await is_admin(message):
-        return await message.answer("❗ Команда доступна только администраторам.", parse_mode="Markdown")
+        return await message.answer("❗ Команда доступна только администраторам чата.", parse_mode="Markdown")
     
     await message.reply("⏳ Узнаю свой IP-адрес...")
     async with aiohttp.ClientSession() as session:
@@ -105,7 +107,7 @@ async def cmd_getip(message: Message):
         parse_mode="Markdown", disable_web_page_preview=True
     )
 
-# ─── ДЛЯ ВСЕХ (НЕ ТОЛЬКО АДМИНЫ) ──────────────────────────────────────
+# ─── ДЛЯ ВСЕХ (ОБЩАЯ ИНФА) ──────────────────────────────────────────
 @dp.message(Command("clubsinfo"))
 async def cmd_clubsinfo(message: Message):
     data = load_data()
@@ -155,7 +157,7 @@ async def cmd_clubinfo(message: Message):
 @dp.message(Command("addclub"))
 async def cmd_addclub(message: Message):
     if not await is_admin(message):
-        return await message.reply("❗ Команда доступна только администраторам.", parse_mode="Markdown")
+        return await message.reply("❗ Команда доступна только администраторам чата.", parse_mode="Markdown")
     
     args = message.text.split()
     if len(args) < 2:
@@ -199,7 +201,7 @@ async def cmd_addclub(message: Message):
 @dp.message(Command("removeclub"))
 async def cmd_removeclub(message: Message):
     if not await is_admin(message):
-        return await message.reply("❗ Команда доступна только администраторам.", parse_mode="Markdown")
+        return await message.reply("❗ Команда доступна только администраторам чата.", parse_mode="Markdown")
     
     args = message.text.split()
     if len(args) < 2:
@@ -221,7 +223,7 @@ async def cmd_removeclub(message: Message):
 @dp.message(Command("resetclubs"))
 async def cmd_resetclubs(message: Message):
     if not await is_admin(message):
-        return await message.reply("❗ Команда доступна только администраторам.", parse_mode="Markdown")
+        return await message.reply("❗ Команда доступна только администраторам чата.", parse_mode="Markdown")
     
     data = load_data()
     chat_id = str(message.chat.id)
@@ -234,12 +236,12 @@ async def cmd_resetclubs(message: Message):
         await message.reply("📭 В этом чате нет отслеживаемых клубов.")
 
 # ------------------------------------------------------------------
-# 👁️ ФОНОВЫЙ МОНИТОРИНГ (Проверяет все клубы во всех чатах)
+# 👁️ ФОНОВЫЙ МОНИТОРИНГ
 async def monitor_loop():
     await asyncio.sleep(20)
     while True:
         data = load_data()
-        ip_warning_sent = {}  # Сохраняем ID чатов, которым уже прислали предупреждение
+        ip_warning_sent = {}
         
         for chat_id, clubs in data.items():
             for tag, old_info in list(clubs.items()):
@@ -248,8 +250,8 @@ async def monitor_loop():
                 if status == 403 and chat_id not in ip_warning_sent:
                     try:
                         await bot.send_message(chat_id, 
-                            "🚨 *ВНИМАНИЕ!* Мой IP-адрес изменился или устарел.\n"
-                            "Администратору нужно написать `/getip` и обновить белый список на сайте.",
+                            "🚨 *ВНИМАНИЕ!* Мой IP-адрес изменился.\n"
+                            "Администратору нужно написать `/getip` и обновить белый список на сайте Supercell.",
                             parse_mode="Markdown")
                         ip_warning_sent[chat_id] = True
                     except: pass
@@ -279,8 +281,7 @@ async def monitor_loop():
                 
                 if changes:
                     msg = f"🔄 *Изменения в клубе {club.get('name', tag)}*\n\n" + "\n".join(changes)
-                    try: 
-                        await bot.send_message(chat_id, msg, parse_mode="Markdown")
+                    try: await bot.send_message(chat_id, msg, parse_mode="Markdown")
                     except: pass
                     
                     data[chat_id][tag]["trophies"] = club.get("trophies", 0)

@@ -2,20 +2,19 @@ import os
 import json
 import asyncio
 import aiohttp
-from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiohttp import web
 
 # ------------------------------------------------------------------
-# Конфигурация из переменных окружения
-BOT_TOKEN = os.getenv("8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg")
-BS_API_TOKEN = os.getenv("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk3NDVhOTdkLWI1NjUtNDZjNi1hYjk2LWQyNzA4ZTYwYzY0ZCIsImlhdCI6MTc3ODUxMTE0OCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMC4wLjAuMCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.e5A40jmtz88Zx4lzrLQADT3HaABHAdos5gbpZpgoc8hXS41lnVSEOLgSqAJIWxC0a_28xBTDm2eTKOrADM2K9A")
-BASE_URL = os.getenv("https://leadboardinvitetracker.onrender.com")          # например https://your-bot.onrender.com
-PORT = int(os.getenv("PORT", 8080))       # Render сам задаёт порт
-CHECK_INTERVAL = 900                      # 15 минут между проверками (в секундах)
-PING_INTERVAL = 600                       # 10 минут самопинга
+# Конфигурация (все токены уже подставлены)
+BOT_TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg"
+BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk3NDVhOTdkLWI1NjUtNDZjNi1hYjk2LWQyNzA4ZTYwYzY0ZCIsImlhdCI6MTc3ODUxMTE0OCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMC4wLjAuMCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.e5A40jmtz88Zx4lzrLQADT3HaABHAdos5gbpZpgoc8hXS41lnVSEOLgSqAJIWxC0a_28xBTDm2eTKOrADM2K9A"
+BASE_URL = "https://leadboardinvitetracker.onrender.com"
+PORT = int(os.getenv("PORT", 8080))
+CHECK_INTERVAL = 900
+PING_INTERVAL = 600
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -95,14 +94,13 @@ async def cmd_add_club(message: Message):
             await message.reply(f"ℹ️ Клуб {club['name']} уже отслеживается в этом чате.")
         return
 
-    # Сохраняем метаданные и начальное состояние
     data["clubs"][tag] = {
         "name": club["name"],
         "chat_ids": [message.chat.id],
         "last_member_count": club["memberCount"],
         "last_trophies": club["trophies"],
         "last_required_trophies": club["requiredTrophies"],
-        "last_members": []   # будет обновлено при первой проверке
+        "last_members": []
     }
     save_data(data)
     await message.reply(
@@ -124,7 +122,6 @@ async def cmd_remove_club(message: Message):
     if tag not in data["clubs"]:
         await message.reply("Этот клуб не отслеживается.")
         return
-    # Удаляем этот чат из подписчиков
     if message.chat.id in data["clubs"][tag]["chat_ids"]:
         data["clubs"][tag]["chat_ids"].remove(message.chat.id)
     if not data["clubs"][tag]["chat_ids"]:
@@ -160,7 +157,6 @@ async def cmd_club_info(message: Message):
     members = await fetch_club_members(tag)
     if members is None:
         members = []
-    # Формируем список участников
     member_lines = []
     for m in sorted(members, key=lambda x: x.get("trophies", 0), reverse=True):
         member_lines.append(f"{m['name']} – {m['trophies']} 🏆")
@@ -181,7 +177,6 @@ async def check_clubs():
         club = await fetch_club_info(tag)
         if club is None:
             continue
-        # Сравниваем с сохранёнными данными
         changes = []
         if club["memberCount"] != info["last_member_count"]:
             changes.append(f"👥 Участники: {info['last_member_count']} → {club['memberCount']}")
@@ -190,7 +185,6 @@ async def check_clubs():
         if club["requiredTrophies"] != info["last_required_trophies"]:
             changes.append(f"🚪 Порог: {info['last_required_trophies']} → {club['requiredTrophies']}")
 
-        # Сравниваем участников (имена + кубки) – упрощённо
         old_members = info.get("last_members", [])
         new_members = await fetch_club_members(tag) or []
         old_dict = {m["tag"]: m for m in old_members}
@@ -210,7 +204,6 @@ async def check_clubs():
                 except Exception:
                     pass
 
-        # Обновляем сохранённое состояние
         info["last_member_count"] = club["memberCount"]
         info["last_trophies"] = club["trophies"]
         info["last_required_trophies"] = club["requiredTrophies"]
@@ -219,13 +212,13 @@ async def check_clubs():
     save_data(data)
 
 async def monitor_loop():
-    await asyncio.sleep(10)  # небольшой стартовый задел
+    await asyncio.sleep(10)
     while True:
         await check_clubs()
         await asyncio.sleep(CHECK_INTERVAL)
 
 # ------------------------------------------------------------------
-# Самопинг (чтобы Render не засыпал)
+# Самопинг
 async def self_ping():
     if not BASE_URL:
         return
@@ -239,7 +232,6 @@ async def self_ping():
                 print(f"Ping failed: {e}")
             await asyncio.sleep(PING_INTERVAL)
 
-# Минимальный веб-сервер для ответа на пинг (и потенциальных вебхуков)
 async def handle_ping(request):
     return web.Response(text="pong")
 
@@ -255,12 +247,9 @@ async def run_web_server():
 # ------------------------------------------------------------------
 # Главная точка входа
 async def main():
-    # Запускаем фоновые задачи
     asyncio.create_task(self_ping())
     asyncio.create_task(run_web_server())
     asyncio.create_task(monitor_loop())
-
-    # Запускаем поллинг бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

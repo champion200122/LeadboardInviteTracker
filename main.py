@@ -1,244 +1,249 @@
-import os
+# main.py
 import asyncio
 import logging
-import sqlite3
-import aiohttp
+import os
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+import aiosqlite
+import csv
+from datetime import datetime
 
-# ================= ТОКЕНЫ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-BS_API_TOKEN = os.getenv("BS_API_TOKEN")
+# ================== НАСТРОЙКИ ==================
+TOKEN = os.getenv("BOT_TOKEN")  # ставь в переменные окружения на Render
+ADMIN_IDS = [123456789, 987654321]  # ← твои Telegram ID
 
-# Защита от запуска без токенов
-if not BOT_TOKEN:
-    raise Exception("Ошибка: BOT_TOKEN не задан в переменных окружения!")
-if not BS_API_TOKEN:
-    raise Exception("Ошибка: BS_API_TOKEN не задан в переменных окружения!")
+# ================== БД ==================
+DB_NAME = "contest.db"
 
-ADMIN_IDS = [827744412]  # ← Твой ID (можно оставить навсегда)
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                invites INTEGER DEFAULT 0,
+                ref_link TEXT UNIQUE,
+                banned INTEGER DEFAULT 0,
+                joined_date TEXT
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS clubs (
+                tag TEXT PRIMARY KEY,
+                name TEXT
+            )
+        ''')
+        await db.commit()
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# ================== БОТ ==================
+bot = Bot(token=TOKEN, parse_mode="HTML")
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# ================= БАЗА ДАННЫХ =================
-def init_db():
-    conn = sqlite3.connect('contest.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (user_id INTEGER PRIMARY KEY, username TEXT, score INTEGER DEFAULT 0, invited_count INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS clubs 
-                 (tag TEXT PRIMARY KEY, name TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS verified_invites 
-                 (bs_tag TEXT PRIMARY KEY, inviter_id INTEGER)''')
-    conn.commit()
-    conn.close()
+# Генерация реф-ссылки
+def generate_ref(user_id: int) -> str:
+    return f"https://t.me/{(await bot.get_me()).username}?start=ref_{user_id}"
 
-def get_db():
-    return sqlite3.connect('contest.db')
-
-# ================= УТИЛИТЫ =================
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-async def get_public_ip():
-    async with aiohttp.ClientSession() as session:
-        async with session.get('https://api.ipify.org') as response:
-            return await response.text()
-
-async def check_bs_player(tag: str):
-    tag = tag.replace('#', '%23')
-    url = f"https://api.brawlstars.com/v1/players/{tag}"
-    headers = {"Authorization": f"Bearer {BS_API_TOKEN}"}
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status == 200:
-                return await response.json()
-            return None
-
-# ================= КОМАНДЫ =================
+# ================== КОМАНДЫ ==================
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message):
+async def start_cmd(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "Unknown"
-    args = message.text.split()
+    username = message.from_user.username or "NoUsername"
+    ref = None
     
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
+    if message.text.startswith("/start ref_"):
+        ref = int(message.text.split("ref_")[1])
     
-    if len(args) > 1:
-        inviter_id = int(args[1])
-        if inviter_id != user_id:
-            c.execute("UPDATE users SET invited_count = invited_count + 1 WHERE user_id = ?", (inviter_id,))
-            await bot.send_message(inviter_id, "Кто-то перешёл по твоей ссылке!")
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
             
-    conn.commit()
-    conn.close()
-
-    kb = InlineKeyboardBuilder()
-    kb.add(InlineKeyboardButton(text="Получить мою ссылку", callback_data="get_link"))
-    kb.add(InlineKeyboardButton(text="Таблица лидеров", callback_data="show_top"))
-    
-    await message.answer(
-        f"Привет, {message.from_user.full_name}!\n\n"
-        "Готов забрать PRO PASS?\n"
-        "Приглашай друзей — побеждай!\n\n"
-        "Нажми кнопку ниже, чтобы получить свою реферальную ссылку:",
-        reply_markup=kb.as_markup()
-    )
-
-@dp.callback_query(F.data == "get_link")
-async def get_link_callback(callback: types.CallbackQuery):
-    bot_info = await bot.get_me()
-    link = f"https://t.me/{bot_info.username}?start={callback.from_user.id}"
-    await callback.answer(f"Твоя ссылка:\n{link}\n\nСкопируй и отправь друзьям!", show_alert=True)
-
-@dp.callback_query(F.data == "show_top")
-@dp.message(Command("top"))
-async def cmd_top(event):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT username, score FROM users WHERE score > 0 ORDER BY score DESC LIMIT 10")
-    top = c.fetchall()
-    conn.close()
-    
-    text = "ТОП-10 УЧАСТНИКОВ\n\n"
-    if not top:
-        text += "Пока пусто..."
-    else:
-        for i, (name, score) in enumerate(top, 1):
-            text += f"{i}. @{name or 'Unknown'} — {score} инвайтов\n"
-    
-    if isinstance(event, types.CallbackQuery):
-        await event.message.edit_text(text, parse_mode="Markdown")
-    else:
-        await event.answer(text, parse_mode="Markdown")
-
-# ================= АДМИН КОМАНДЫ =================
-@dp.message(Command("getip"))
-async def cmd_getip(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    ip = await get_public_ip()
-    await message.answer(f"IP сервера: <code>{ip}</code>\nВставь его в настройки API ключа на developer.brawlstars.com", parse_mode="HTML")
-
-@dp.message(Command("add_club"))
-async def cmd_add_club(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    try:
-        parts = message.text.split(maxsplit=2)
-        tag = parts[1].upper()
-        name = parts[2]
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO clubs (tag, name) VALUES (?, ?)", (tag, name))
-        conn.commit()
-        conn.close()
-        await message.answer(f"Клуб {name} ({tag}) добавлен!")
-    except:
-        await message.answer("Формат: /add_club #TAG Название клуба")
-
-@dp.message(Command("clubsinfo"))
-async def cmd_clubsinfo(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT tag, name FROM clubs")
-    clubs = c.fetchall()
-    conn.close()
-    if not clubs:
-        await message.answer("Клубы не добавлены.")
-        return
-    text = "Зарегистрированные клубы:\n"
-    for tag, name in clubs:
-        text += f"• {name} — {tag}\n"
-    await message.answer(text)
-
-@dp.message(Command("verify"))
-async def cmd_verify(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    # Пример: /verify #2PP00 @username
-    try:
-        parts = message.text.split()
-        bs_tag = parts[1].upper()
-        inviter_ref = parts[2].lstrip('@')
-
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT inviter_id FROM verified_invites WHERE bs_tag = ?", (bs_tag,))
-        if c.fetchone():
-            await message.answer("Этот игрок уже засчитан!")
-            conn.close()
-            return
-
-        c.execute("SELECT user_id FROM users WHERE username = ?", (inviter_ref,))
-        row = c.fetchone()
         if not row:
-            await message.answer("Не найден пользователь с таким username")
-            conn.close()
-            return
-        inviter_id = row[0]
-
-        player = await check_bs_player(bs_tag)
-        if not player:
-            await message.answer("Игрок не найден в Brawl Stars")
-            conn.close()
-            return
-
-        club = player.get('club', {})
-        if not club:
-            await message.answer(f"{player['name']} не состоит в клубе")
-            conn.close()
-            return
-
-        c.execute("SELECT tag FROM clubs")
-        allowed = [row[0] for row in c.fetchall()]
+            ref_link = generate_ref(user_id)
+            joined_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+            await db.execute(
+                "INSERT INTO users (user_id, username, ref_link, joined_date) VALUES (?, ?, ?, ?)",
+                (user_id, username, ref_link, joined_date)
+            )
+            await db.commit()
+            
+            # Если пришёл по рефералке — засчитываем инвайт пригласившему
+            if ref and ref != user_id:
+                async with db.execute("SELECT banned FROM users WHERE user_id = ?", (ref,)) as cursor:
+                    inviter = await cursor.fetchone()
+                if inviter and not inviter[0]:  # не забанен
+                    await db.execute("UPDATE users SET invites = invites + 1 WHERE user_id = ?", (ref,))
+                    await db.commit()
+                    try:
+                        await bot.send_message(ref, f"🎉 Новый игрок по твоей ссылке!\n+1 инвайт ✅\nВсего: {inviter[0]+1}")
+                    except:
+                        pass
         
-        if club['tag'].upper() in allowed:
-            c.execute("UPDATE users SET score = score + 1 WHERE user_id = ?", (inviter_id,))
-            c.execute("INSERT INTO verified_invites (bs_tag, inviter_id) VALUES (?, ?)", (bs_tag, inviter_id))
-            conn.commit()
-            conn.close()
-            await message.answer(f"ЗАСЧИТАНО!\n{player['name']} в клубе {club['name']}\n+1 балл @{inviter_ref}")
-            try:
-                await bot.send_message(inviter_id, f"Твой инвайт {player['name']} подтверждён! +1 балл")
-            except: pass
         else:
-            await message.answer(f"Игрок в клубе {club['name']}, но он не в списке разрешённых")
-        conn.close()
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}\nФормат: /verify #TAG @username")
+            ref_link = row[3] if len(row) > 3 else generate_ref(user_id)
 
-@dp.message(Command("add_point"))
-async def cmd_add_point(message: types.Message):
-    if not is_admin(message.from_user.id): return
+    keyboard = InlineKeyboardButton(text="Моя реферальная ссылка", url=ref_link)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[keyboard]])
+    
+    text = (
+        "🔥 <b>Конкурс инвайтов запущен!</b>\n\n"
+        "Приглашай друзей — главный приз PRO PASS!\n\n"
+        f"Твоя персональная ссылка 👇"
+    )
+    await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    user_id = message.from_user.id
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT invites, ref_link FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+        
+        if not row:
+            await message.answer("Ты ещё не участвуешь. Напиши /start")
+            return
+            
+        invites = row[0]
+        link = row[1]
+        
+        # Топ-10
+        async with db.execute("SELECT username, invites FROM users WHERE banned = 0 ORDER BY invites DESC LIMIT 10") as cursor:
+            top = await cursor.fetchall()
+        
+        top_text = "\n".join([f"{i+1}. @{u[0] if u[0] else 'NoName'} — {u[1]}" for i, u in enumerate(top)]) if top else "Пока пусто"
+        
+        text = (
+            f"<b>Твоя статистика:</b>\n"
+            f"Инвайтов: <b>{invites}</b>\n\n"
+            f"<b>Топ-10:</b>\n{top_text}"
+        )
+        await message.answer(text)
+
+# ================== АДМИНСКИЕ КОМАНДЫ ==================
+async def is_admin(message: Message) -> bool:
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("⛔ Доступ запрещён")
+        return False
+    return True
+
+@dp.message(Command("addclub"))
+async def add_club(message: Message):
+    if not await is_admin(message): return
     try:
-        parts = message.text.split()
-        uid = int(parts[1])
-        amount = int(parts[2])
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE users SET score = score + ? WHERE user_id = ?", (amount, uid))
-        conn.commit()
-        conn.close()
-        await message.answer(f"Баллы изменены у {uid} на {amount}")
+        tag = message.text.split()[1].upper()
+        name = " ".join(message.text.split()[2:])
+        if not name:
+            await message.answer("Использование: /addclub #TAG Название клуба")
+            return
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("INSERT OR REPLACE INTO clubs (tag, name) VALUES (?, ?)", (tag, name))
+            await db.commit()
+        await message.answer(f"Клуб добавлен: {tag} — {name}")
     except:
-        await message.answer("Формат: /add_point USER_ID AMOUNT")
+        await message.answer("Ошибка. Пример: /addclub #2PPPPP Клуб Чемпионов")
 
-# ================= ЗАПУСК =================
+@dp.message(Command("removeclub"))
+async def remove_club(message: Message):
+    if not await is_admin(message): return
+    try:
+        tag = message.text.split()[1].upper()
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("DELETE FROM clubs WHERE tag = ?", (tag,))
+            await db.commit()
+        await message.answer(f"Клуб {tag} удалён")
+    except:
+        await message.answer("Укажи тег: /removeclub #2PPPPP")
+
+@dp.message(Command("addinvite"))
+async def add_invite(message: Message):
+    if not await is_admin(message): return
+    try:
+        username = message.text.split()[1].replace("@", "")
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE users SET invites = invites + 1 WHERE username = ?", (username,))
+            if db.total_changes == 0:
+                await message.answer("Пользователь не найден")
+            else:
+                await db.commit()
+                await message.answer(f"+1 инвайт для @{username}")
+    except:
+        await message.answer("Использование: /addinvite @username")
+
+@dp.message(Command("removeinvite"))
+async def remove_invite(message: Message):
+    if not await is_admin(message): return
+    try:
+        username = message.text.split()[1].replace("@", "")
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE users SET invites = invites - 1 WHERE username = ? AND invites > 0", (username,))
+            if db.total_changes > 0:
+                await db.commit()
+                await message.answer(f"-1 инвайт у @{username}")
+            else:
+                await message.answer("Нечего снимать или пользователь не найден")
+    except:
+        await message.answer("Использование: /removeinvite @username")
+
+@dp.message(Command("ban"))
+async def ban_user(message: Message):
+    if not await is_admin(message): return
+    try:
+        username = message.text.split()[1].replace("@", "")
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE users SET banned = 1 WHERE username = ?", (username,))
+            await db.commit()
+        await message.answer(f"@{username} забанен")
+    except:
+        await message.answer("Ошибка")
+
+@dp.message(Command("unban"))
+async def unban_user(message: Message):
+    if not await is_admin(message): return
+    try:
+        username = message.text.split()[1].replace("@", "")
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE users SET banned = 0 WHERE username = ?", (username,))
+            await db.commit()
+        await message.answer(f"@{username} разбанен")
+    except:
+        await message.answer("Ошибка")
+
+@dp.message(Command("top"))
+async def admin_top(message: Message):
+    if not await is_admin(message): return
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT username, invites, joined_date FROM users WHERE banned = 0 ORDER BY invites DESC") as cursor:
+            rows = await cursor.fetchall()
+    
+    text = "<b>Полный топ участников:</b>\n\n"
+    for i, row in enumerate(rows):
+        text += f"{i+1}. @{row[0] or 'NoName'} — {row[1]} инвайтов (с {row[2]})\n"
+    
+    await message.answer(text or "Пусто")
+
+@dp.message(Command("export"))
+async def export_csv(message: Message):
+    if not await is_admin(message): return
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT user_id, username, invites, joined_date, banned FROM users ORDER BY invites DESC") as cursor:
+            rows = await cursor.fetchall()
+    
+    with open("export.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["ID", "Username", "Invites", "Joined", "Banned"])
+        writer.writerows(rows)
+    
+    await message.answer_document(types.FSInputFile("export.csv"), caption="Экспорт участников")
+
+# ================== ЗАПУСК ==================
 async def main():
-    init_db()
-    logging.basicConfig(level=logging.INFO)
-
-    # Немного подождать, чтобы Render успел поднять контейнер
-    if os.getenv("RENDER"):
-        await asyncio.sleep(5)
-
-    print("Бот запущен и работает!")
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    await init_db()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())

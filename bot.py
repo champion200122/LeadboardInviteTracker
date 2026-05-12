@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,19 @@ WEB_PORT: int = int(os.environ.get("PORT", 10000))
 logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("invite_bot")
+
+# ──────────────────── SIGTERM: МГНОВЕННАЯ СМЕРТЬ ────────────────────
+# Render шлёт SIGTERM при редеплое. Мы ОБЯЗАНЫ умереть немедленно,
+# иначе старый инстанс будет конфликтовать с новым.
+
+def handle_sigterm(signum, frame):
+    log.info("☠️ Получен SIGTERM — немедленное завершение!")
+    # os._exit() вместо sys.exit() — гарантированно убивает процесс,
+    # не ждёт asyncio cleanup, не ждёт finally-блоков.
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 # ──────────────────── ДАННЫЕ ────────────────────
 
@@ -619,37 +633,20 @@ tr:nth-child(even) {{ background: #0f3460; }}
     return web.Response(text=html, content_type="text/html")
 
 
-# ──────────────────── УБИЙЦА СТАРЫХ СЕССИЙ ────────────────────
+# ──────────────────── ЗАПУСК ────────────────────
 
-async def force_kill_old_polling():
+async def wait_for_clear_session():
     """
-    Агрессивно отбирает polling-сессию у старого инстанса.
-    
-    Проблема: на Render бесплатном при редеплое старый контейнер ещё жив
-    10-30 секунд. Два инстанса одновременно делают getUpdates → Conflict.
-    
-    Решение: мы делаем серию коротких getUpdates-запросов напрямую через API.
-    Каждый наш запрос «выбивает» старый инстанс. Через несколько попыток
-    старый инстанс сдаётся (его Render убьёт), и мы запускаем нормальный polling.
+    Ждём пока старый инстанс сдохнет, проверяя getUpdates.
+    Если за 60 сек не очистится — стартуем как есть (aiogram сам retry).
     """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-    
-    log.info("=== ФАЗА 1: Сброс webhook ===")
+
     async with ClientSession() as session:
-        # Удаляем webhook если был
-        async with session.post(f"{url}/deleteWebhook",
-                                json={"drop_pending_updates": True}) as resp:
-            result = await resp.json()
-            log.info(f"deleteWebhook: {result}")
-        
-        log.info("=== ФАЗА 2: Отбираем сессию у старого инстанса ===")
-        # Делаем серию быстрых getUpdates чтобы «перебить» старый polling.
-        # timeout=1 — запрос длится ~1 сек, это короткий polling.
-        # Старый инстанс получит Conflict и начнёт тормозить (sleep + retry).
-        # Мы повторяем 15 раз с паузой 3 сек = ~45 сек — за это время
-        # Render убьёт старый контейнер.
-        
-        for attempt in range(15):
+        # Сброс webhook
+        await session.post(f"{url}/deleteWebhook", json={"drop_pending_updates": True})
+
+        for attempt in range(20):
             try:
                 async with session.post(
                     f"{url}/getUpdates",
@@ -658,48 +655,27 @@ async def force_kill_old_polling():
                 ) as resp:
                     result = await resp.json()
                     if result.get("ok"):
-                        log.info(f"  Попытка {attempt+1}/15: ✅ getUpdates OK — старый инстанс мёртв!")
-                        # Успех! Но сделаем ещё пару для надёжности
-                        await asyncio.sleep(2)
-                        # Ещё 2 проверки подряд
-                        ok_streak = 1
-                        for _ in range(2):
-                            async with session.post(
-                                f"{url}/getUpdates",
-                                json={"timeout": 1, "offset": -1},
-                                timeout=aiohttp.ClientTimeout(total=10)
-                            ) as resp2:
-                                r2 = await resp2.json()
-                                if r2.get("ok"):
-                                    ok_streak += 1
-                        if ok_streak >= 3:
-                            log.info(f"  ✅✅✅ 3 успеха подряд — путь свободен!")
-                            return True
+                        log.info(f"✅ Попытка {attempt+1}: сессия свободна!")
+                        return
                     else:
-                        error = result.get("description", "")
-                        if "Conflict" in error:
-                            log.info(f"  Попытка {attempt+1}/15: ⏳ Conflict — старый инстанс ещё жив, ждём...")
+                        desc = result.get("description", "")
+                        if "Conflict" in desc:
+                            log.info(f"⏳ Попытка {attempt+1}/20: старый инстанс жив, ждём 3 сек...")
                         else:
-                            log.warning(f"  Попытка {attempt+1}/15: ❌ {error}")
+                            log.warning(f"❌ Попытка {attempt+1}: {desc}")
             except Exception as e:
-                log.warning(f"  Попытка {attempt+1}/15: ❌ Exception: {e}")
-            
+                log.warning(f"❌ Попытка {attempt+1}: {e}")
+
             await asyncio.sleep(3)
-        
-        log.warning("⚠️ Не удалось полностью вытеснить старый инстанс за 45 сек. Запускаем polling как есть...")
-        return False
 
+    log.warning("⚠️ Не дождались очистки за 60 сек, стартуем как есть.")
 
-# ──────────────────── ЗАПУСК ────────────────────
 
 async def main():
     if not DATA_PATH.exists():
         save_data({"admins": [OWNER_USERNAME], "participants": {}})
 
-    # АГРЕССИВНО убиваем старую polling-сессию
-    await force_kill_old_polling()
-
-    # Запускаем web-сервер
+    # Сначала веб-сервер — чтобы Render видел что порт открыт
     app = web.Application()
     app.router.add_get("/", handle_health)
     app.router.add_get("/stats", handle_stats)
@@ -707,21 +683,18 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
     await site.start()
-    log.info(f"Web server started on port {WEB_PORT}")
+    log.info(f"✅ Web server on port {WEB_PORT}")
 
-    # Запускаем self-ping
+    # Ждём пока старый инстанс умрёт
+    await wait_for_clear_session()
+
+    # Self-ping
     asyncio.create_task(self_ping())
 
-    # Сбрасываем pending ещё раз перед стартом
+    # Polling
+    log.info("🚀 Starting polling...")
     await bot.delete_webhook(drop_pending_updates=True)
-
-    # Запускаем бота
-    log.info("Bot starting polling...")
-    try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    finally:
-        log.info("Bot stopping...")
-        await bot.session.close()
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":

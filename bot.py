@@ -1,12 +1,21 @@
+"""
+Telegram-бот для учёта конкурса инвайтов.
+Хранение: JSON-файл (data.json)
+Фреймворк: aiogram 3.x
+Anti-sleep: встроенный self-ping через aiohttp
+
+Все команды работают через @username участников.
+"""
+
 import asyncio
 import json
 import logging
 import os
-import signal
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
@@ -22,7 +31,7 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 BOT_TOKEN: str = config["BOT_TOKEN"]
-OWNER_USERNAME: str = config["OWNER_USERNAME"].lower().lstrip("@")  # главный админ
+OWNER_USERNAME: str = config["OWNER_USERNAME"].lower().lstrip("@")
 PING_URL: str = config.get("PING_URL", "")
 PING_INTERVAL: int = 300
 WEB_PORT: int = int(os.environ.get("PORT", 10000))
@@ -33,24 +42,6 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout,
 log = logging.getLogger("invite_bot")
 
 # ──────────────────── ДАННЫЕ ────────────────────
-# Структура data.json:
-# {
-#   "admins": ["owner_username", "admin2"],     — список юзернеймов (без @, lowercase)
-#   "participants": {
-#       "username": {                            — ключ = юзернейм (lowercase, без @)
-#           "name": "Отображаемое Имя",
-#           "invite_link": "https://t.me/...",
-#           "tg_id": 123456,                     — заполняется автоматически при /mystats
-#           "invites": [
-#               {
-#                   "name": "Друг",
-#                   "added_at": "2025-01-01 12:00",
-#                   "removed": false
-#               }
-#           ]
-#       }
-#   }
-# }
 
 def load_data() -> dict:
     if DATA_PATH.exists():
@@ -65,12 +56,10 @@ def save_data(data: dict):
 
 
 def normalize_username(raw: str) -> str:
-    """Убирает @ и приводит к lowercase."""
     return raw.lower().lstrip("@").strip()
 
 
 def get_caller_username(msg: Message) -> str | None:
-    """Получает username отправителя сообщения."""
     if msg.from_user and msg.from_user.username:
         return msg.from_user.username.lower()
     return None
@@ -100,7 +89,6 @@ dp.include_router(router)
 
 
 def require_username(func):
-    """Декоратор: требует наличие username у отправителя."""
     async def wrapper(msg: Message, *args, **kwargs):
         if not msg.from_user or not msg.from_user.username:
             await msg.answer(
@@ -113,10 +101,9 @@ def require_username(func):
 
 
 def admin_only(func):
-    """Декоратор: только для админов."""
     async def wrapper(msg: Message, *args, **kwargs):
         if not msg.from_user or not msg.from_user.username:
-            await msg.answer("⚠️ У тебя нет username. Установи его в настройках Telegram.")
+            await msg.answer("⚠️ У тебя нет username.")
             return
         data = load_data()
         if not is_admin(msg, data):
@@ -127,7 +114,6 @@ def admin_only(func):
 
 
 def owner_only(func):
-    """Декоратор: только для главного админа."""
     async def wrapper(msg: Message, *args, **kwargs):
         if not is_owner(msg):
             await msg.answer("⛔ Только главный админ может использовать эту команду.")
@@ -142,12 +128,10 @@ def owner_only(func):
 @require_username
 async def cmd_start(msg: Message):
     data = load_data()
-    # Автопривязка tg_id к участнику
     uname = get_caller_username(msg)
     if uname and uname in data["participants"]:
         data["participants"][uname]["tg_id"] = msg.from_user.id
         save_data(data)
-
     if is_admin(msg, data):
         await msg.answer(
             "👋 <b>Привет, админ!</b>\n\n"
@@ -205,15 +189,11 @@ async def cmd_help(msg: Message):
 async def cmd_mystats(msg: Message):
     data = load_data()
     uname = get_caller_username(msg)
-
     if uname not in data["participants"]:
         await msg.answer("❌ Ты не зарегистрирован как участник конкурса.\nОбратись к админу.")
         return
-
-    # Автопривязка tg_id
     data["participants"][uname]["tg_id"] = msg.from_user.id
     save_data(data)
-
     p = data["participants"][uname]
     valid = count_valid_invites(p)
     text = f"📊 <b>{p['name']}</b> (@{uname}) — инвайтов: <b>{valid}</b>\n\n"
@@ -238,7 +218,6 @@ async def cmd_top(msg: Message):
         valid = count_valid_invites(p)
         board.append((p["name"], valid, uname))
     board.sort(key=lambda x: x[1], reverse=True)
-
     medals = ["🥇", "🥈", "🥉"]
     text = "🏆 <b>ТАБЛИЦА ЛИДЕРОВ</b>\n\n"
     for i, (name, count, uname) in enumerate(board):
@@ -252,7 +231,6 @@ async def cmd_top(msg: Message):
 @router.message(Command("add_participant"))
 @admin_only
 async def cmd_add_participant(msg: Message):
-    """/add_participant @username Имя"""
     parts = msg.text.split(maxsplit=2)
     if len(parts) < 3:
         await msg.answer("⚠️ Формат: /add_participant @username Имя")
@@ -262,12 +240,10 @@ async def cmd_add_participant(msg: Message):
     if not uname:
         await msg.answer("⚠️ Укажи @username участника.")
         return
-
     data = load_data()
     if uname in data["participants"]:
         await msg.answer(f"⚠️ Участник @{uname} уже существует.")
         return
-
     data["participants"][uname] = {
         "name": name,
         "invite_link": "",
@@ -281,7 +257,6 @@ async def cmd_add_participant(msg: Message):
 @router.message(Command("remove_participant"))
 @admin_only
 async def cmd_remove_participant(msg: Message):
-    """/remove_participant @username"""
     parts = msg.text.split()
     if len(parts) < 2:
         await msg.answer("⚠️ Формат: /remove_participant @username")
@@ -300,7 +275,6 @@ async def cmd_remove_participant(msg: Message):
 @router.message(Command("set_link"))
 @admin_only
 async def cmd_set_link(msg: Message):
-    """/set_link @username ссылка"""
     parts = msg.text.split(maxsplit=2)
     if len(parts) < 3:
         await msg.answer("⚠️ Формат: /set_link @username ссылка")
@@ -324,7 +298,6 @@ async def cmd_list(msg: Message):
         await msg.answer("📭 Нет участников.")
         return
     text = "📋 <b>УЧАСТНИКИ КОНКУРСА</b>\n\n"
-    # Сортируем по инвайтам
     items = sorted(data["participants"].items(),
                    key=lambda x: count_valid_invites(x[1]), reverse=True)
     for uname, p in items:
@@ -340,7 +313,6 @@ async def cmd_list(msg: Message):
 @router.message(Command("info"))
 @admin_only
 async def cmd_info(msg: Message):
-    """/info @username"""
     parts = msg.text.split()
     if len(parts) < 2:
         await msg.answer("⚠️ Формат: /info @username")
@@ -361,10 +333,7 @@ async def cmd_info(msg: Message):
     )
     for i, inv in enumerate(p.get("invites", []), 1):
         status = "❌ УДАЛЁН" if inv.get("removed") else "✅ ок"
-        text += (
-            f"\n  <b>{i}.</b> {inv['name']} — {status}\n"
-            f"      Добавлен: {inv.get('added_at', '?')}\n"
-        )
+        text += f"\n  <b>{i}.</b> {inv['name']} — {status}\n      Добавлен: {inv.get('added_at', '?')}\n"
     if not p.get("invites"):
         text += "  Пока нет инвайтов.\n"
     await msg.answer(text)
@@ -375,7 +344,6 @@ async def cmd_info(msg: Message):
 @router.message(Command("add_invite"))
 @admin_only
 async def cmd_add_invite(msg: Message):
-    """/add_invite @username Имя_приглашённого"""
     parts = msg.text.split(maxsplit=2)
     if len(parts) < 3:
         await msg.answer("⚠️ Формат: /add_invite @username Имя_друга")
@@ -386,7 +354,6 @@ async def cmd_add_invite(msg: Message):
     if uname not in data["participants"]:
         await msg.answer("❌ Участник не найден. Сначала /add_participant")
         return
-
     invite_entry = {
         "name": invite_name,
         "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -394,22 +361,16 @@ async def cmd_add_invite(msg: Message):
     }
     data["participants"][uname]["invites"].append(invite_entry)
     save_data(data)
-
     valid = count_valid_invites(data["participants"][uname])
     await msg.answer(
         f"✅ Инвайт <b>{invite_name}</b> добавлен для <b>{data['participants'][uname]['name']}</b> (@{uname})!\n"
         f"📊 Теперь инвайтов: <b>{valid}</b>"
     )
-
-    # Уведомляем участника если знаем его tg_id
     tg_id = data["participants"][uname].get("tg_id")
     if tg_id:
         try:
-            await bot.send_message(
-                tg_id,
-                f"🎉 Тебе засчитан новый инвайт: <b>{invite_name}</b>!\n"
-                f"📊 Всего инвайтов: <b>{valid}</b>"
-            )
+            await bot.send_message(tg_id,
+                f"🎉 Тебе засчитан новый инвайт: <b>{invite_name}</b>!\n📊 Всего инвайтов: <b>{valid}</b>")
         except Exception:
             pass
 
@@ -417,7 +378,6 @@ async def cmd_add_invite(msg: Message):
 @router.message(Command("remove_invite"))
 @admin_only
 async def cmd_remove_invite(msg: Message):
-    """/remove_invite @username номер"""
     parts = msg.text.split()
     if len(parts) < 3:
         await msg.answer("⚠️ Формат: /remove_invite @username номер")
@@ -428,7 +388,6 @@ async def cmd_remove_invite(msg: Message):
     except ValueError:
         await msg.answer("⚠️ Номер должен быть числом.")
         return
-
     data = load_data()
     if uname not in data["participants"]:
         await msg.answer("❌ Участник не найден.")
@@ -440,25 +399,19 @@ async def cmd_remove_invite(msg: Message):
     if invites[idx].get("removed"):
         await msg.answer("⚠️ Этот инвайт уже удалён.")
         return
-
     invites[idx]["removed"] = True
     save_data(data)
-
     valid = count_valid_invites(data["participants"][uname])
     await msg.answer(
         f"🗑 Инвайт #{idx + 1} (<b>{invites[idx]['name']}</b>) удалён у "
         f"<b>{data['participants'][uname]['name']}</b> (@{uname}).\n"
         f"📊 Теперь инвайтов: <b>{valid}</b>"
     )
-
     tg_id = data["participants"][uname].get("tg_id")
     if tg_id:
         try:
-            await bot.send_message(
-                tg_id,
-                f"⚠️ Инвайт <b>{invites[idx]['name']}</b> был аннулирован.\n"
-                f"📊 Теперь инвайтов: <b>{valid}</b>"
-            )
+            await bot.send_message(tg_id,
+                f"⚠️ Инвайт <b>{invites[idx]['name']}</b> был аннулирован.\n📊 Теперь инвайтов: <b>{valid}</b>")
         except Exception:
             pass
 
@@ -466,7 +419,6 @@ async def cmd_remove_invite(msg: Message):
 @router.message(Command("restore_invite"))
 @admin_only
 async def cmd_restore_invite(msg: Message):
-    """/restore_invite @username номер"""
     parts = msg.text.split()
     if len(parts) < 3:
         await msg.answer("⚠️ Формат: /restore_invite @username номер")
@@ -477,7 +429,6 @@ async def cmd_restore_invite(msg: Message):
     except ValueError:
         await msg.answer("⚠️ Номер должен быть числом.")
         return
-
     data = load_data()
     if uname not in data["participants"]:
         await msg.answer("❌ Участник не найден.")
@@ -489,10 +440,8 @@ async def cmd_restore_invite(msg: Message):
     if not invites[idx].get("removed"):
         await msg.answer("⚠️ Этот инвайт и так активен.")
         return
-
     invites[idx]["removed"] = False
     save_data(data)
-
     valid = count_valid_invites(data["participants"][uname])
     await msg.answer(
         f"♻️ Инвайт #{idx + 1} (<b>{invites[idx]['name']}</b>) восстановлен!\n"
@@ -575,7 +524,7 @@ async def cmd_broadcast(msg: Message):
             failed += 1
     result = f"📤 Отправлено: {sent} | Не доставлено: {failed}"
     if no_id:
-        result += f"\n⚠️ {no_id} участников ещё не написали боту /start (нет tg_id)"
+        result += f"\n⚠️ {no_id} участников ещё не написали боту /start"
     await msg.answer(result)
 
 
@@ -586,14 +535,12 @@ async def cmd_export(msg: Message):
     if not data["participants"]:
         await msg.answer("📭 Нет данных.")
         return
-
     lines = ["ТАБЛИЦА КОНКУРСА ИНВАЙТОВ", "=" * 40, ""]
     board = []
     for uname, p in data["participants"].items():
         valid = count_valid_invites(p)
         board.append((valid, uname, p))
     board.sort(key=lambda x: x[0], reverse=True)
-
     for rank, (count, uname, p) in enumerate(board, 1):
         lines.append(f"#{rank} — {p['name']} (@{uname})")
         lines.append(f"     Инвайтов: {count}")
@@ -602,7 +549,6 @@ async def cmd_export(msg: Message):
             status = "[УДАЛЁН]" if inv.get("removed") else "[OK]"
             lines.append(f"       {i}. {inv['name']} {status} (добавлен {inv.get('added_at', '?')})")
         lines.append("")
-
     result = "\n".join(lines)
     if len(result) > 4000:
         file = BufferedInputFile(result.encode("utf-8"), filename="export.txt")
@@ -616,10 +562,7 @@ async def cmd_export(msg: Message):
 async def cmd_reset_all(msg: Message):
     parts = msg.text.split()
     if len(parts) < 2 or parts[1] != "ПОДТВЕРЖДАЮ":
-        await msg.answer(
-            "⚠️ Это удалит ВСЕ данные!\n"
-            "Для подтверждения: /reset_all ПОДТВЕРЖДАЮ"
-        )
+        await msg.answer("⚠️ Это удалит ВСЕ данные!\nДля подтверждения: /reset_all ПОДТВЕРЖДАЮ")
         return
     data = {"admins": [OWNER_USERNAME], "participants": {}}
     save_data(data)
@@ -630,7 +573,7 @@ async def cmd_reset_all(msg: Message):
 
 async def self_ping():
     if not PING_URL:
-        log.warning("PING_URL пуст — anti-sleep отключен. Заполни config.json после деплоя.")
+        log.warning("PING_URL пуст — anti-sleep отключен.")
         return
     await asyncio.sleep(30)
     async with ClientSession() as session:
@@ -656,11 +599,9 @@ async def handle_stats(request):
         valid = count_valid_invites(p)
         board.append((p["name"], valid, uname))
     board.sort(key=lambda x: x[1], reverse=True)
-
     rows = ""
     for i, (name, count, uname) in enumerate(board, 1):
         rows += f"<tr><td>{i}</td><td>{name}</td><td>@{uname}</td><td>{count}</td></tr>"
-
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Invite Contest</title>
 <style>
@@ -678,22 +619,85 @@ tr:nth-child(even) {{ background: #0f3460; }}
     return web.Response(text=html, content_type="text/html")
 
 
+# ──────────────────── УБИЙЦА СТАРЫХ СЕССИЙ ────────────────────
+
+async def force_kill_old_polling():
+    """
+    Агрессивно отбирает polling-сессию у старого инстанса.
+    
+    Проблема: на Render бесплатном при редеплое старый контейнер ещё жив
+    10-30 секунд. Два инстанса одновременно делают getUpdates → Conflict.
+    
+    Решение: мы делаем серию коротких getUpdates-запросов напрямую через API.
+    Каждый наш запрос «выбивает» старый инстанс. Через несколько попыток
+    старый инстанс сдаётся (его Render убьёт), и мы запускаем нормальный polling.
+    """
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    
+    log.info("=== ФАЗА 1: Сброс webhook ===")
+    async with ClientSession() as session:
+        # Удаляем webhook если был
+        async with session.post(f"{url}/deleteWebhook",
+                                json={"drop_pending_updates": True}) as resp:
+            result = await resp.json()
+            log.info(f"deleteWebhook: {result}")
+        
+        log.info("=== ФАЗА 2: Отбираем сессию у старого инстанса ===")
+        # Делаем серию быстрых getUpdates чтобы «перебить» старый polling.
+        # timeout=1 — запрос длится ~1 сек, это короткий polling.
+        # Старый инстанс получит Conflict и начнёт тормозить (sleep + retry).
+        # Мы повторяем 15 раз с паузой 3 сек = ~45 сек — за это время
+        # Render убьёт старый контейнер.
+        
+        for attempt in range(15):
+            try:
+                async with session.post(
+                    f"{url}/getUpdates",
+                    json={"timeout": 1, "offset": -1},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    result = await resp.json()
+                    if result.get("ok"):
+                        log.info(f"  Попытка {attempt+1}/15: ✅ getUpdates OK — старый инстанс мёртв!")
+                        # Успех! Но сделаем ещё пару для надёжности
+                        await asyncio.sleep(2)
+                        # Ещё 2 проверки подряд
+                        ok_streak = 1
+                        for _ in range(2):
+                            async with session.post(
+                                f"{url}/getUpdates",
+                                json={"timeout": 1, "offset": -1},
+                                timeout=aiohttp.ClientTimeout(total=10)
+                            ) as resp2:
+                                r2 = await resp2.json()
+                                if r2.get("ok"):
+                                    ok_streak += 1
+                        if ok_streak >= 3:
+                            log.info(f"  ✅✅✅ 3 успеха подряд — путь свободен!")
+                            return True
+                    else:
+                        error = result.get("description", "")
+                        if "Conflict" in error:
+                            log.info(f"  Попытка {attempt+1}/15: ⏳ Conflict — старый инстанс ещё жив, ждём...")
+                        else:
+                            log.warning(f"  Попытка {attempt+1}/15: ❌ {error}")
+            except Exception as e:
+                log.warning(f"  Попытка {attempt+1}/15: ❌ Exception: {e}")
+            
+            await asyncio.sleep(3)
+        
+        log.warning("⚠️ Не удалось полностью вытеснить старый инстанс за 45 сек. Запускаем polling как есть...")
+        return False
+
+
 # ──────────────────── ЗАПУСК ────────────────────
 
-async def on_startup():
-    """Сброс webhook и pending updates при старте — решает Conflict ошибку."""
-    log.info("Сбрасываем webhook и pending updates...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    log.info("Webhook сброшен, pending updates очищены.")
-
-
 async def main():
-    # Инициализируем data.json если нет
     if not DATA_PATH.exists():
         save_data({"admins": [OWNER_USERNAME], "participants": {}})
 
-    # Сбрасываем конфликт ПЕРЕД стартом polling
-    await on_startup()
+    # АГРЕССИВНО убиваем старую polling-сессию
+    await force_kill_old_polling()
 
     # Запускаем web-сервер
     app = web.Application()
@@ -708,8 +712,10 @@ async def main():
     # Запускаем self-ping
     asyncio.create_task(self_ping())
 
-    # Запускаем бота (с retry=False чтобы при конфликте не зацикливался,
-    # а сразу падал и Render перезапускал)
+    # Сбрасываем pending ещё раз перед стартом
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    # Запускаем бота
     log.info("Bot starting polling...")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

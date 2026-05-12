@@ -3,7 +3,6 @@ Telegram-бот для учёта конкурса инвайтов.
 Хранение: JSON-файл (data.json)
 Фреймворк: aiogram 3.x
 Anti-sleep: встроенный self-ping через aiohttp
-
 Все команды работают через @username участников.
 """
 
@@ -13,6 +12,7 @@ import logging
 import os
 import signal
 import sys
+import functools
 from datetime import datetime
 from pathlib import Path
 
@@ -42,42 +42,32 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("invite_bot")
 
-# ──────────────────── SIGTERM: МГНОВЕННАЯ СМЕРТЬ ────────────────────
-# Render шлёт SIGTERM при редеплое. Мы ОБЯЗАНЫ умереть немедленно,
-# иначе старый инстанс будет конфликтовать с новым.
-
+# ──────────────────── SIGTERM ────────────────────
 def handle_sigterm(signum, frame):
     log.info("☠️ Получен SIGTERM — немедленное завершение!")
-    # os._exit() вместо sys.exit() — гарантированно убивает процесс,
-    # не ждёт asyncio cleanup, не ждёт finally-блоков.
     os._exit(0)
 
 signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
 
 # ──────────────────── ДАННЫЕ ────────────────────
-
 def load_data() -> dict:
     if DATA_PATH.exists():
         with open(DATA_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     return {"admins": [OWNER_USERNAME], "participants": {}}
 
-
 def save_data(data: dict):
     with open(DATA_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
 def normalize_username(raw: str) -> str:
     return raw.lower().lstrip("@").strip()
-
 
 def get_caller_username(msg: Message) -> str | None:
     if msg.from_user and msg.from_user.username:
         return msg.from_user.username.lower()
     return None
-
 
 def is_admin(msg: Message, data: dict) -> bool:
     uname = get_caller_username(msg)
@@ -85,15 +75,12 @@ def is_admin(msg: Message, data: dict) -> bool:
         return False
     return uname == OWNER_USERNAME or uname in data.get("admins", [])
 
-
 def is_owner(msg: Message) -> bool:
     uname = get_caller_username(msg)
     return uname is not None and uname == OWNER_USERNAME
 
-
 def count_valid_invites(participant: dict) -> int:
     return sum(1 for inv in participant.get("invites", []) if not inv.get("removed", False))
-
 
 # ──────────────────── БОТ ────────────────────
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -101,8 +88,10 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+# ──────────────────── ДЕКОРАТОРЫ (с functools.wraps!) ────────────────────
 
 def require_username(func):
+    @functools.wraps(func)
     async def wrapper(msg: Message, *args, **kwargs):
         if not msg.from_user or not msg.from_user.username:
             await msg.answer(
@@ -113,8 +102,8 @@ def require_username(func):
         return await func(msg, *args, **kwargs)
     return wrapper
 
-
 def admin_only(func):
+    @functools.wraps(func)
     async def wrapper(msg: Message, *args, **kwargs):
         if not msg.from_user or not msg.from_user.username:
             await msg.answer("⚠️ У тебя нет username.")
@@ -126,15 +115,14 @@ def admin_only(func):
         return await func(msg, *args, **kwargs)
     return wrapper
 
-
 def owner_only(func):
+    @functools.wraps(func)
     async def wrapper(msg: Message, *args, **kwargs):
         if not is_owner(msg):
             await msg.answer("⛔ Только главный админ может использовать эту команду.")
             return
         return await func(msg, *args, **kwargs)
     return wrapper
-
 
 # ═══════════════ ОБЩИЕ КОМАНДЫ ═══════════════
 
@@ -158,7 +146,6 @@ async def cmd_start(msg: Message):
             "/mystats — мои инвайты\n"
             "/top — таблица лидеров"
         )
-
 
 @router.message(Command("help"))
 @require_username
@@ -195,7 +182,6 @@ async def cmd_help(msg: Message):
         )
     await msg.answer(text)
 
-
 # ═══════════════ ПОЛЬЗОВАТЕЛЬСКИЕ ═══════════════
 
 @router.message(Command("mystats"))
@@ -220,7 +206,6 @@ async def cmd_mystats(msg: Message):
         text += "  Пока нет инвайтов."
     await msg.answer(text)
 
-
 @router.message(Command("top"))
 async def cmd_top(msg: Message):
     data = load_data()
@@ -238,7 +223,6 @@ async def cmd_top(msg: Message):
         medal = medals[i] if i < 3 else f"  {i+1}."
         text += f"{medal} <b>{name}</b> (@{uname}) — {count} инвайтов\n"
     await msg.answer(text)
-
 
 # ═══════════════ АДМИН: УЧАСТНИКИ ═══════════════
 
@@ -267,7 +251,6 @@ async def cmd_add_participant(msg: Message):
     save_data(data)
     await msg.answer(f"✅ Участник <b>{name}</b> (@{uname}) добавлен!")
 
-
 @router.message(Command("remove_participant"))
 @admin_only
 async def cmd_remove_participant(msg: Message):
@@ -285,7 +268,6 @@ async def cmd_remove_participant(msg: Message):
     save_data(data)
     await msg.answer(f"🗑 Участник <b>{name}</b> (@{uname}) удалён.")
 
-
 @router.message(Command("set_link"))
 @admin_only
 async def cmd_set_link(msg: Message):
@@ -302,7 +284,6 @@ async def cmd_set_link(msg: Message):
     data["participants"][uname]["invite_link"] = link
     save_data(data)
     await msg.answer(f"🔗 Ссылка для <b>{data['participants'][uname]['name']}</b> (@{uname}) установлена.")
-
 
 @router.message(Command("list"))
 @admin_only
@@ -322,7 +303,6 @@ async def cmd_list(msg: Message):
             f"    Инвайтов: {valid} | {link_status}\n"
         )
     await msg.answer(text)
-
 
 @router.message(Command("info"))
 @admin_only
@@ -351,7 +331,6 @@ async def cmd_info(msg: Message):
     if not p.get("invites"):
         text += "  Пока нет инвайтов.\n"
     await msg.answer(text)
-
 
 # ═══════════════ АДМИН: ИНВАЙТЫ ═══════════════
 
@@ -387,7 +366,6 @@ async def cmd_add_invite(msg: Message):
                 f"🎉 Тебе засчитан новый инвайт: <b>{invite_name}</b>!\n📊 Всего инвайтов: <b>{valid}</b>")
         except Exception:
             pass
-
 
 @router.message(Command("remove_invite"))
 @admin_only
@@ -429,7 +407,6 @@ async def cmd_remove_invite(msg: Message):
         except Exception:
             pass
 
-
 @router.message(Command("restore_invite"))
 @admin_only
 async def cmd_restore_invite(msg: Message):
@@ -462,7 +439,6 @@ async def cmd_restore_invite(msg: Message):
         f"📊 Теперь инвайтов: <b>{valid}</b>"
     )
 
-
 # ═══════════════ АДМИН: УПРАВЛЕНИЕ АДМИНАМИ ═══════════════
 
 @router.message(Command("add_admin"))
@@ -480,7 +456,6 @@ async def cmd_add_admin(msg: Message):
     data["admins"].append(new_admin)
     save_data(data)
     await msg.answer(f"✅ @{new_admin} теперь админ.")
-
 
 @router.message(Command("remove_admin"))
 @owner_only
@@ -501,7 +476,6 @@ async def cmd_remove_admin(msg: Message):
     save_data(data)
     await msg.answer(f"🗑 @{rm_admin} больше не админ.")
 
-
 @router.message(Command("admins"))
 @admin_only
 async def cmd_admins(msg: Message):
@@ -511,7 +485,6 @@ async def cmd_admins(msg: Message):
         owner_mark = " 👑 (главный)" if a == OWNER_USERNAME else ""
         text += f"• @{a}{owner_mark}\n"
     await msg.answer(text)
-
 
 # ═══════════════ АДМИН: ПРОЧЕЕ ═══════════════
 
@@ -541,7 +514,6 @@ async def cmd_broadcast(msg: Message):
         result += f"\n⚠️ {no_id} участников ещё не написали боту /start"
     await msg.answer(result)
 
-
 @router.message(Command("export"))
 @admin_only
 async def cmd_export(msg: Message):
@@ -570,7 +542,6 @@ async def cmd_export(msg: Message):
     else:
         await msg.answer(f"<pre>{result}</pre>")
 
-
 @router.message(Command("reset_all"))
 @owner_only
 async def cmd_reset_all(msg: Message):
@@ -582,9 +553,7 @@ async def cmd_reset_all(msg: Message):
     save_data(data)
     await msg.answer("💥 Все данные сброшены.")
 
-
 # ──────────────────── ANTI-SLEEP ────────────────────
-
 async def self_ping():
     if not PING_URL:
         log.warning("PING_URL пуст — anti-sleep отключен.")
@@ -599,12 +568,9 @@ async def self_ping():
                 log.warning(f"Self-ping error: {e}")
             await asyncio.sleep(PING_INTERVAL)
 
-
 # ──────────────────── WEB-СЕРВЕР ────────────────────
-
 async def handle_health(request):
     return web.Response(text="OK")
-
 
 async def handle_stats(request):
     data = load_data()
@@ -632,20 +598,11 @@ tr:nth-child(even) {{ background: #0f3460; }}
 </body></html>"""
     return web.Response(text=html, content_type="text/html")
 
-
 # ──────────────────── ЗАПУСК ────────────────────
-
 async def wait_for_clear_session():
-    """
-    Ждём пока старый инстанс сдохнет, проверяя getUpdates.
-    Если за 60 сек не очистится — стартуем как есть (aiogram сам retry).
-    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
     async with ClientSession() as session:
-        # Сброс webhook
         await session.post(f"{url}/deleteWebhook", json={"drop_pending_updates": True})
-
         for attempt in range(20):
             try:
                 async with session.post(
@@ -665,17 +622,14 @@ async def wait_for_clear_session():
                             log.warning(f"❌ Попытка {attempt+1}: {desc}")
             except Exception as e:
                 log.warning(f"❌ Попытка {attempt+1}: {e}")
-
             await asyncio.sleep(3)
-
     log.warning("⚠️ Не дождались очистки за 60 сек, стартуем как есть.")
-
 
 async def main():
     if not DATA_PATH.exists():
         save_data({"admins": [OWNER_USERNAME], "participants": {}})
 
-    # Сначала веб-сервер — чтобы Render видел что порт открыт
+    # Сначала веб-сервер
     app = web.Application()
     app.router.add_get("/", handle_health)
     app.router.add_get("/stats", handle_stats)
@@ -695,7 +649,6 @@ async def main():
     log.info("🚀 Starting polling...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
 
 if __name__ == "__main__":
     asyncio.run(main())

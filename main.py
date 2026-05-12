@@ -1,385 +1,280 @@
-import os
-import json
 import asyncio
+import logging
+import sqlite3
 import aiohttp
-from urllib.parse import quote
-from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import Message, ChatMemberOwner, ChatMemberAdministrator
-from aiohttp import web
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart, Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ------------------------------------------------------------------
-# ⚙️ КОНФИГУРАЦИЯ
+# ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg"
-BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6IjBkNGFjZDMzLTU2NWYtNDQ0Ni04OWM0LWNlZjYzMDIwYzE0MSIsImlhdCI6MTc3ODUyMjMyNSwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiMTI4LjEyOC4xMjguMTI4Il0sInR5cGUiOiJjbGllbnQifV19.S3BnJs26o89lH9sRvdaTF_EldGce_vX4rwqanplYHPIBvFhCMhdDn1o196Xvs6RdhDnOhGmbtYre2sSPStDcoA"
-BASE_URL = "https://leadboardinvitetracker.onrender.com"
-PORT = int(os.getenv("PORT", 8080))
+BS_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6Ijk4Y2Q3NzViLThjZTYtNGNjMy1iNDc3LTA3YmQxZDAzOTNkNiIsImlhdCI6MTc3ODUxNjUwNCwic3ViIjoiZGV2ZWxvcGVyLzVkYmMwMDMyLTA4OGYtMTc5ZS01ZWQ5LWZlZTkxNDQ5MjNhNCIsInNjb3BlcyI6WyJicmF3bHN0YXJzIl0sImxpbWl0cyI6W3sidGllciI6ImRldmVsb3Blci9zaWx2ZXIiLCJ0eXBlIjoidGhyb3R0bGluZyJ9LHsiY2lkcnMiOlsiNzQuMjIwLjQ4LjIzNSJdLCJ0eXBlIjoiY2xpZW50In1dfQ.Z4_SyqzVyzAiUiLfUTorcEcgq8YOJWPWgYxsxxMfwp3pX4BcsFBSAhekIjafQi66KKlAJWk2ehNtllIH48Mthw"
+ADMIN_IDS = [827744412] # Замени на свой ID Telegram
 
-CHECK_INTERVAL = 600
-PING_INTERVAL = 300
-
+# Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-DATA_FILE = "clubs_data.json"
 
-# ------------------------------------------------------------------
-# 💾 БАЗА ДАННЫХ
-def load_data():
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+# ================= БАЗА ДАННЫХ =================
+def init_db():
+    conn = sqlite3.connect('contest.db')
+    c = conn.cursor()
+    # Таблица участников
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id INTEGER PRIMARY KEY, username TEXT, score INTEGER DEFAULT 0, invited_count INTEGER DEFAULT 0)''')
+    # Таблица клубов
+    c.execute('''CREATE TABLE IF NOT EXISTS clubs 
+                 (tag TEXT PRIMARY KEY, name TEXT)''')
+    # Таблица подтвержденных инвайтов (чтобы не засчитывать одного и того же дважды)
+    c.execute('''CREATE TABLE IF NOT EXISTS verified_invites 
+                 (bs_tag TEXT PRIMARY KEY, inviter_id INTEGER)''')
+    conn.commit()
+    conn.close()
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def get_db():
+    return sqlite3.connect('contest.db')
 
-# ------------------------------------------------------------------
-# 🛡️ ПРОВЕРКА АДМИНИСТРАТОРА (ИСПРАВЛЕННАЯ)
-async def is_admin(message: Message) -> bool:
-    # В личке всегда админ
-    if message.chat.type == "private":
-        return True
+# ================= УТИЛИТЫ =================
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
-    # Если пишет анонимно от имени чата
-    if message.sender_chat and message.sender_chat.id == message.chat.id:
-        return True
-
-    # Если from_user вообще нет
-    if not message.from_user:
-        return False
-
-    try:
-        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-        return isinstance(member, (ChatMemberOwner, ChatMemberAdministrator))
-    except Exception as e:
-        print(f"[ADMIN CHECK ERROR] {e}")
-        return False
-
-# ------------------------------------------------------------------
-# 🌐 BRAWL STARS API
-async def bs_api(path: str):
-    url = f"https://bsproxy.royaleapi.dev/v1{path}"
-    headers = {"Authorization": f"Bearer {BS_API_TOKEN}"}
+async def get_public_ip():
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.json(), 200
-            return None, resp.status
+        async with session.get('https://api.ipify.org') as response:
+            return await response.text()
 
-def enc(tag: str):
-    return quote(tag.upper().strip(), safe='')
+async def check_bs_player(tag: str):
+    """Проверяет игрока через Brawl Stars API"""
+    tag = tag.replace('#', '%23')
+    url = f"https://api.brawlstars.com/v1/players/{tag}"
+    headers = {"Authorization": f"Bearer {BS_API_TOKEN}"}
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            return None
 
-# ------------------------------------------------------------------
-# 🤖 КОМАНДЫ — ДЛЯ ВСЕХ
+# ================= КОМАНДЫ =================
 
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    admin = await is_admin(message)
-    if admin:
-        await message.answer(
-            "👋 Привет, админ!\n\n"
-            "🔒 *Команды для админов:*\n"
-            "/getip — узнать IP бота\n"
-            "/addclub `#ТЕГ` — добавить клуб\n"
-            "/removeclub `#ТЕГ` — удалить клуб\n"
-            "/resetclubs — удалить все клубы\n\n"
-            "🌐 *Команды для всех:*\n"
-            "/clubsinfo — инфа обо всех клубах чата\n"
-            "/clubinfo `#ТЕГ` — подробная инфа о клубе\n"
-            "/whoami — проверить свой статус",
-            parse_mode="Markdown"
-        )
-    else:
-        await message.answer(
-            "👋 Привет!\n\n"
-            "🌐 *Доступные команды:*\n"
-            "/clubsinfo — инфа обо всех клубах чата\n"
-            "/clubinfo `#ТЕГ` — подробная инфа о клубе\n"
-            "/whoami — проверить свой статус",
-            parse_mode="Markdown"
-        )
-
-@dp.message(Command("whoami"))
-async def cmd_whoami(message: Message):
-    admin = await is_admin(message)
-    status = "✅ Админ" if admin else "❌ Не админ"
-
-    if message.from_user:
-        await message.reply(
-            f"👤 *Твой статус:* {status}\n"
-            f"🆔 ID: `{message.from_user.id}`\n"
-            f"📛 Username: @{message.from_user.username or 'нет'}\n"
-            f"💬 Тип чата: `{message.chat.type}`\n"
-            f"🕵️ sender\\_chat: `{message.sender_chat.id if message.sender_chat else 'None'}`",
-            parse_mode="Markdown"
-        )
-    else:
-        await message.reply(
-            f"👤 *Твой статус:* {status}\n"
-            f"🆔 from\\_user: None\n"
-            f"🕵️ sender\\_chat: `{message.sender_chat.id if message.sender_chat else 'None'}`\n"
-            f"💬 Тип чата: `{message.chat.type}`",
-            parse_mode="Markdown"
-        )
-
-@dp.message(Command("clubsinfo"))
-async def cmd_clubsinfo(message: Message):
-    data = load_data()
-    chat_id = str(message.chat.id)
-
-    if chat_id not in data or not data[chat_id]:
-        return await message.reply("📭 В этом чате нет отслеживаемых клубов.")
-
-    text = "🏢 *Клубы этого чата:*\n\n"
-    for tag, info in data[chat_id].items():
-        text += (
-            f"🔹 *{info['name']}* (`{tag}`)\n"
-            f"   👥 {info['memberCount']}/30 | 🏆 {info['trophies']} | 🚪 {info['requiredTrophies']}\n\n"
-        )
-    await message.reply(text.strip(), parse_mode="Markdown")
-
-@dp.message(Command("clubinfo"))
-async def cmd_clubinfo(message: Message):
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
     args = message.text.split()
-    if len(args) < 2:
-        return await message.reply("❗ Укажи тег: `/clubinfo #ТЕГ`", parse_mode="Markdown")
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Регистрация пользователя
+    c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
+    
+    # Логика рефералки
+    if len(args) > 1:
+        inviter_id = int(args[1])
+        if inviter_id != user_id:
+            # Увеличиваем счетчик сырых приглашений у пригласившего
+            c.execute("UPDATE users SET invited_count = invited_count + 1 WHERE user_id = ?", (inviter_id,))
+            await bot.send_message(inviter_id, f"🔥 Кто-то перешел по твоей ссылке! Осталось дождаться, пока он вступит в клуб.")
+            
+    conn.commit()
+    conn.close()
 
-    tag = args[1].upper()
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    club, status = await bs_api(f"/clubs/{enc(tag)}")
-    if status == 403:
-        return await message.reply("🚫 *Ошибка 403.* Админу нужно обновить IP через `/getip`.", parse_mode="Markdown")
-    if not club:
-        return await message.reply("❌ Клуб не найден.")
-
-    members_data, _ = await bs_api(f"/clubs/{enc(tag)}/members")
-    members = members_data.get("items", []) if members_data else []
-    members.sort(key=lambda x: x.get("trophies", 0), reverse=True)
-
-    members_text = "\n".join(
-        [f"{i+1}. {m['name']} — {m['trophies']} 🏆" for i, m in enumerate(members)]
+    text = (
+        f"Привет, {message.from_user.full_name}! 👋\n\n"
+        f"Хочешь выиграть PRO PASS? 🏆\n"
+        f"1. Нажми кнопку ниже, чтобы получить свою ссылку.\n"
+        f"2. Отправь её друзьям.\n"
+        f"3. Друг должен вступить в наш чат И в клуб Brawl Stars.\n"
+        f"4. Когда друг вступит, пришли его тег (например #2PP00) админу @masuchkavince для проверки!"
     )
+    
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="🔗 Получить мою ссылку", callback_data="get_link"))
+    kb.add(InlineKeyboardButton(text="🏆 Таблица лидеров", callback_data="show_top"))
+    
+    await message.answer(text, reply_markup=kb.as_markup())
 
-    await message.reply(
-        f"🏠 *{club['name']}* (`{tag}`)\n"
-        f"👥 {club.get('memberCount', 0)}/30 | 🏆 {club.get('trophies', 0)} | 🚪 {club.get('requiredTrophies', 0)}\n\n"
-        f"📋 *Состав:*\n{members_text if members_text else 'Нет данных'}",
-        parse_mode="Markdown"
-    )
+@dp.callback_query(F.data == "get_link")
+async def get_link_callback(callback: types.CallbackQuery):
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={callback.from_user.id}"
+    await callback.answer(f"Твоя ссылка: {link}", show_alert=True)
 
-# ------------------------------------------------------------------
-# 🔒 КОМАНДЫ — ТОЛЬКО ДЛЯ АДМИНОВ
+# --- АДМИН КОМАНДЫ ---
 
 @dp.message(Command("getip"))
-async def cmd_getip(message: Message):
-    if not await is_admin(message):
-        return await message.reply("❗ Только для администраторов.")
+async def cmd_getip(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    ip = await get_public_ip()
+    await message.answer(f"🌐 IP этого сервера: <code>{ip}</code>\nВставь его в настройки ключа на developer.brawlstars.com", parse_mode="HTML")
 
-    await message.reply("⏳ Узнаю свой IP...")
-    async with aiohttp.ClientSession() as session:
-        async with session.get("https://api.ipify.org?format=json") as resp:
-            data = await resp.json()
-            ip = data.get("ip")
+@dp.message(Command("clubsinfo"))
+async def cmd_clubsinfo(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT tag, name FROM clubs")
+    clubs = c.fetchall()
+    conn.close()
+    
+    if not clubs:
+        await message.answer("Список клубов пуст.")
+        return
+        
+    text = "🏰 **Зарегистрированные клубы:**\n"
+    for tag, name in clubs:
+        text += f"• {name} (`{tag}`)\n"
+    await message.answer(text, parse_mode="Markdown")
 
-    await message.answer(
-        f"🌐 *Мой IP:* `{ip}`\n\n"
-        f"📝 *Что делать:*\n"
-        f"1. Зайди на [developer.brawlstars.com](https://developer.brawlstars.com)\n"
-        f"2. Создай новый ключ с IP: `{ip}`\n"
-        f"3. Скопируй токен и отправь разработчику бота\n"
-        f"4. Или замени токен в коде и передеплой",
-        parse_mode="Markdown",
-        disable_web_page_preview=True
-    )
+@dp.message(Command("add_club"))
+async def cmd_add_club(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    try:
+        # Формат: /add_club #TAG Название
+        parts = message.text.split(maxsplit=2)
+        tag = parts[1].upper()
+        name = parts[2]
+        
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO clubs (tag, name) VALUES (?, ?)", (tag, name))
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Клуб {name} ({tag}) добавлен.")
+    except IndexError:
+        await message.answer("❌ Формат: /add_club #TAG Название")
 
-@dp.message(Command("addclub"))
-async def cmd_addclub(message: Message):
-    if not await is_admin(message):
-        return await message.reply("❗ Только для администраторов.")
+@dp.message(Command("del_club"))
+async def cmd_del_club(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    try:
+        tag = message.text.split()[1].upper()
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM clubs WHERE tag = ?", (tag,))
+        conn.commit()
+        conn.close()
+        await message.answer(f"🗑 Клуб {tag} удален.")
+    except IndexError:
+        await message.answer("❌ Формат: /del_club #TAG")
 
-    args = message.text.split()
-    if len(args) < 2:
-        return await message.reply("❗ Укажи тег: `/addclub #ТЕГ`", parse_mode="Markdown")
+@dp.message(Command("verify"))
+async def cmd_verify(message: types.Message):
+    """Проверка игрока через API"""
+    if not is_admin(message.from_user.id): return
+    
+    try:
+        # Формат: /verify #TAG @username_пригласившего (или ID)
+        parts = message.text.split()
+        bs_tag = parts[1].upper()
+        inviter_ref = parts[2] # Можно передать ID или юзернейм, для простоты сделаем поиск по БД
+        
+        # 1. Проверяем, не засчитан ли уже этот тег
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT inviter_id FROM verified_invites WHERE bs_tag = ?", (bs_tag,))
+        if c.fetchone():
+            await message.answer("⚠️ Этот игрок уже был засчитан ранее!")
+            conn.close()
+            return
 
-    tag = args[1].upper()
-    if not tag.startswith("#"):
-        tag = "#" + tag
+        # 2. Ищем ID пригласившего
+        inviter_id = None
+        if inviter_ref.isdigit():
+            inviter_id = int(inviter_ref)
+        else:
+            c.execute("SELECT user_id FROM users WHERE username = ?", (inviter_ref.replace('@', ''),))
+            res = c.fetchone()
+            if res: inviter_id = res[0]
 
-    club, status = await bs_api(f"/clubs/{enc(tag)}")
+        if not inviter_id:
+            await message.answer("❌ Не найден пользователь, который пригласил.")
+            conn.close()
+            return
 
-    if status == 403:
-        return await message.reply(
-            "🚫 *Ошибка 403 (IP не авторизован)*\n"
-            "Напиши `/getip` чтобы узнать IP.",
-            parse_mode="Markdown"
-        )
-    if not club:
-        return await message.reply("❌ Клуб не найден. Проверь тег.")
+        # 3. Проверяем через Brawl Stars API
+        player_data = await check_bs_player(bs_tag)
+        if not player_data:
+            await message.answer("❌ Игрок не найден в Brawl Stars или ошибка API.")
+            conn.close()
+            return
 
-    data = load_data()
-    chat_id = str(message.chat.id)
-    if chat_id not in data:
-        data[chat_id] = {}
+        player_club = player_data.get('club', {})
+        if not player_club:
+             await message.answer(f"❌ Игрок {player_data['name']} не состоит в клубе.")
+             conn.close()
+             return
 
-    if tag in data[chat_id]:
-        return await message.reply(f"ℹ️ Клуб `{tag}` уже отслеживается.", parse_mode="Markdown")
-
-    members_data, _ = await bs_api(f"/clubs/{enc(tag)}/members")
-    members = members_data.get("items", []) if members_data else []
-
-    data[chat_id][tag] = {
-        "name": club.get("name"),
-        "trophies": club.get("trophies", 0),
-        "requiredTrophies": club.get("requiredTrophies", 0),
-        "memberCount": club.get("memberCount", 0),
-        "members": {m["tag"]: m["name"] for m in members}
-    }
-    save_data(data)
-
-    await message.reply(
-        f"✅ Клуб *{club['name']}* добавлен!\n"
-        f"👥 {club.get('memberCount', 0)}/30 | 🏆 {club.get('trophies', 0)} | 🚪 {club.get('requiredTrophies', 0)}",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("removeclub"))
-async def cmd_removeclub(message: Message):
-    if not await is_admin(message):
-        return await message.reply("❗ Только для администраторов.")
-
-    args = message.text.split()
-    if len(args) < 2:
-        return await message.reply("❗ Укажи тег: `/removeclub #ТЕГ`", parse_mode="Markdown")
-
-    tag = args[1].upper()
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    data = load_data()
-    chat_id = str(message.chat.id)
-
-    if chat_id in data and tag in data[chat_id]:
-        del data[chat_id][tag]
-        save_data(data)
-        await message.reply(f"✅ Клуб `{tag}` удалён.", parse_mode="Markdown")
-    else:
-        await message.reply("❌ Этот клуб не отслеживается.")
-
-@dp.message(Command("resetclubs"))
-async def cmd_resetclubs(message: Message):
-    if not await is_admin(message):
-        return await message.reply("❗ Только для администраторов.")
-
-    data = load_data()
-    chat_id = str(message.chat.id)
-
-    if chat_id in data and data[chat_id]:
-        del data[chat_id]
-        save_data(data)
-        await message.reply("🔁 Все клубы в этом чате удалены.")
-    else:
-        await message.reply("📭 Нечего удалять.")
-
-# ------------------------------------------------------------------
-# 👁️ ФОНОВЫЙ МОНИТОРИНГ
-async def monitor_loop():
-    await asyncio.sleep(20)
-    while True:
-        data = load_data()
-        ip_warning_sent = {}
-
-        for chat_id, clubs in data.items():
-            for tag, old_info in list(clubs.items()):
-                club, status = await bs_api(f"/clubs/{enc(tag)}")
-
-                if status == 403 and chat_id not in ip_warning_sent:
-                    try:
-                        await bot.send_message(
-                            chat_id,
-                            "🚨 *IP бота изменился!*\n"
-                            "Админ, напиши `/getip` и обнови IP на developer.brawlstars.com",
-                            parse_mode="Markdown"
-                        )
-                        ip_warning_sent[chat_id] = True
-                    except:
-                        pass
-                    continue
-
-                if not club:
-                    continue
-
-                members_data, _ = await bs_api(f"/clubs/{enc(tag)}/members")
-                new_members = members_data.get("items", []) if members_data else []
-                new_members_dict = {m["tag"]: m["name"] for m in new_members}
-
-                changes = []
-
-                if club.get("trophies", 0) != old_info["trophies"]:
-                    diff = club["trophies"] - old_info["trophies"]
-                    changes.append(f"🏆 Кубки: {old_info['trophies']} ➔ {club['trophies']} ({diff:+})")
-
-                if club.get("requiredTrophies", 0) != old_info["requiredTrophies"]:
-                    changes.append(f"🚪 Порог: {old_info['requiredTrophies']} ➔ {club['requiredTrophies']}")
-
-                old_members_dict = old_info.get("members", {})
-                joined = set(new_members_dict.keys()) - set(old_members_dict.keys())
-                left = set(old_members_dict.keys()) - set(new_members_dict.keys())
-
-                if joined:
-                    changes.append(f"📥 *Пришли:* {', '.join([new_members_dict[t] for t in joined])}")
-                if left:
-                    changes.append(f"📤 *Ушли:* {', '.join([old_members_dict[t] for t in left])}")
-
-                if changes:
-                    msg = f"🔄 *Изменения в клубе {club.get('name', tag)}*\n\n" + "\n".join(changes)
-                    try:
-                        await bot.send_message(chat_id, msg, parse_mode="Markdown")
-                    except:
-                        pass
-
-                    data[chat_id][tag]["trophies"] = club.get("trophies", 0)
-                    data[chat_id][tag]["requiredTrophies"] = club.get("requiredTrophies", 0)
-                    data[chat_id][tag]["memberCount"] = club.get("memberCount", 0)
-                    data[chat_id][tag]["members"] = new_members_dict
-                    save_data(data)
-
-                await asyncio.sleep(1)
-
-        await asyncio.sleep(CHECK_INTERVAL)
-
-# ------------------------------------------------------------------
-# 🏓 САМОПИНГ И ВЕБ-СЕРВЕР
-async def self_pinger():
-    await asyncio.sleep(10)
-    async with aiohttp.ClientSession() as session:
-        while True:
+        # 4. Проверяем, является ли клуб "нашим"
+        c.execute("SELECT tag FROM clubs")
+        allowed_clubs = [row[0] for row in c.fetchall()]
+        
+        player_club_tag = player_club.get('tag', '').upper()
+        
+        if player_club_tag in allowed_clubs:
+            # УСПЕХ! Начисляем балл
+            c.execute("UPDATE users SET score = score + 1 WHERE user_id = ?", (inviter_id,))
+            c.execute("INSERT INTO verified_invites (bs_tag, inviter_id) VALUES (?, ?)", (bs_tag, inviter_id))
+            conn.commit()
+            await message.answer(f"✅ **ЗАСЧИТАНО!**\nИгрок: {player_data['name']}\nКлуб: {player_club['name']}\nБалл начислен пользователю ID: {inviter_id}")
+            
+            # Уведомляем пригласившего
             try:
-                await session.get(f"{BASE_URL}/ping")
-            except:
-                pass
-            await asyncio.sleep(PING_INTERVAL)
+                await bot.send_message(inviter_id, f"🎉 Твой инвайт {player_data['name']} подтвержден! +1 балл.")
+            except: pass
+        else:
+            await message.answer(f"❌ Игрок состоит в клубе {player_club['name']} ({player_club_tag}), но его нет в списке разрешенных.")
+            
+        conn.close()
 
-async def handle_ping(request):
-    return web.Response(text="pong")
+    except IndexError:
+        await message.answer("❌ Формат: /verify #BS_TAG @username_inviter")
 
-async def run_web_server():
-    app = web.Application()
-    app.router.add_get("/ping", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    print(f"Web server on port {PORT}")
+@dp.message(Command("add_point"))
+async def cmd_add_point(message: types.Message):
+    """Ручное добавление (если API лагает или нужно наказать/поощрить)"""
+    if not is_admin(message.from_user.id): return
+    try:
+        user_id = int(message.text.split()[1])
+        amount = int(message.text.split()[2])
+        
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE users SET score = score + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Пользователю {user_id} изменен счет на {amount}.")
+    except:
+        await message.answer("❌ Формат: /add_point USER_ID AMOUNT")
 
-# ------------------------------------------------------------------
-# 🚀 ЗАПУСК
+@dp.message(Command("top"))
+@dp.callback_query(F.data == "show_top")
+async def cmd_top(event: types.Message | types.CallbackQuery):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT username, score FROM users ORDER BY score DESC LIMIT 10")
+    top_users = c.fetchall()
+    conn.close()
+    
+    text = "🏆 **ТОП-10 УЧАСТНИКОВ** 🏆\n\n"
+    if not top_users:
+        text += "Пока пусто..."
+    else:
+        for i, (uname, score) in enumerate(top_users, 1):
+            text += f"{i}. @{uname} — {score} инвайтов\n"
+            
+    if isinstance(event, types.Message):
+        await event.answer(text, parse_mode="Markdown")
+    else:
+        await event.message.edit_text(text, parse_mode="Markdown")
+
+# ================= ЗАПУСК =================
 async def main():
-    asyncio.create_task(run_web_server())
-    asyncio.create_task(self_pinger())
-    asyncio.create_task(monitor_loop())
+    init_db()
+    logging.basicConfig(level=logging.INFO)
+    print("Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

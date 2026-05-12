@@ -4,7 +4,8 @@ import os
 import csv
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import Message, FSInputFile
 import aiosqlite
@@ -17,7 +18,7 @@ ADMIN_IDS = [827744412]   # ← ОБЯЗАТЕЛЬНО поменяй на св�
 if not TOKEN:
     raise ValueError("BOT_TOKEN не найден! Добавь его в Environment Variables на Render.")
 
-bot = Bot(token=TOKEN, parse_mode="HTML")
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 DB_NAME = "contest.db"

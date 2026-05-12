@@ -32,7 +32,7 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 BOT_TOKEN: str = config["BOT_TOKEN"]
-OWNER_USERNAME: str = config["OWNER_USERNAME"].lower().lstrip("@")
+OWNER_ID: int = 827744412  # Telegram ID главного админа
 PING_URL: str = config.get("PING_URL", "")
 PING_INTERVAL: int = 300
 WEB_PORT: int = int(os.environ.get("PORT", 10000))
@@ -55,7 +55,7 @@ def load_data() -> dict:
     if DATA_PATH.exists():
         with open(DATA_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"admins": [OWNER_USERNAME], "participants": {}}
+    return {"admins": [OWNER_ID], "participants": {}}
 
 def save_data(data: dict):
     with open(DATA_PATH, "w", encoding="utf-8") as f:
@@ -64,20 +64,28 @@ def save_data(data: dict):
 def normalize_username(raw: str) -> str:
     return raw.lower().lstrip("@").strip()
 
+def get_caller_id(msg: Message) -> int | None:
+    if msg.from_user:
+        return msg.from_user.id
+    return None
+
 def get_caller_username(msg: Message) -> str | None:
     if msg.from_user and msg.from_user.username:
         return msg.from_user.username.lower()
     return None
 
 def is_admin(msg: Message, data: dict) -> bool:
-    uname = get_caller_username(msg)
-    if not uname:
+    """Проверка: owner по ID ИЛИ admin по ID в списке admins."""
+    uid = get_caller_id(msg)
+    if not uid:
         return False
-    return uname == OWNER_USERNAME or uname in data.get("admins", [])
+    if uid == OWNER_ID:
+        return True
+    return uid in data.get("admins", [])
 
 def is_owner(msg: Message) -> bool:
-    uname = get_caller_username(msg)
-    return uname is not None and uname == OWNER_USERNAME
+    uid = get_caller_id(msg)
+    return uid is not None and uid == OWNER_ID
 
 def count_valid_invites(participant: dict) -> int:
     return sum(1 for inv in participant.get("invites", []) if not inv.get("removed", False))
@@ -88,7 +96,7 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# ──────────────────── ДЕКОРАТОРЫ (с functools.wraps!) ────────────────────
+# ──────────────────── ДЕКОРАТОРЫ ────────────────────
 
 def require_username(func):
     @functools.wraps(func)
@@ -105,9 +113,6 @@ def require_username(func):
 def admin_only(func):
     @functools.wraps(func)
     async def wrapper(msg: Message, *args, **kwargs):
-        if not msg.from_user or not msg.from_user.username:
-            await msg.answer("⚠️ У тебя нет username.")
-            return
         data = load_data()
         if not is_admin(msg, data):
             await msg.answer("⛔ У тебя нет доступа к этой команде.")
@@ -172,8 +177,8 @@ async def cmd_help(msg: Message):
             "/remove_invite @user номер — −1\n"
             "/restore_invite @user номер — восстановить\n\n"
             "<b>Админы:</b>\n"
-            "/add_admin @user — назначить\n"
-            "/remove_admin @user — снять\n"
+            "/add_admin ID — назначить (Telegram ID)\n"
+            "/remove_admin ID — снять\n"
             "/admins — список\n\n"
             "<b>Прочее:</b>\n"
             "/broadcast текст — рассылка\n"
@@ -446,35 +451,43 @@ async def cmd_restore_invite(msg: Message):
 async def cmd_add_admin(msg: Message):
     parts = msg.text.split()
     if len(parts) < 2:
-        await msg.answer("⚠️ Формат: /add_admin @username")
+        await msg.answer("⚠️ Формат: /add_admin <ID>\nПример: /add_admin 123456789")
         return
-    new_admin = normalize_username(parts[1])
+    try:
+        new_admin_id = int(parts[1])
+    except ValueError:
+        await msg.answer("⚠️ Укажи числовой Telegram ID.\nПример: /add_admin 123456789")
+        return
     data = load_data()
-    if new_admin in data["admins"]:
+    if new_admin_id in data["admins"]:
         await msg.answer("⚠️ Уже админ.")
         return
-    data["admins"].append(new_admin)
+    data["admins"].append(new_admin_id)
     save_data(data)
-    await msg.answer(f"✅ @{new_admin} теперь админ.")
+    await msg.answer(f"✅ Пользователь с ID <code>{new_admin_id}</code> теперь админ.")
 
 @router.message(Command("remove_admin"))
 @owner_only
 async def cmd_remove_admin(msg: Message):
     parts = msg.text.split()
     if len(parts) < 2:
-        await msg.answer("⚠️ Формат: /remove_admin @username")
+        await msg.answer("⚠️ Формат: /remove_admin <ID>")
         return
-    rm_admin = normalize_username(parts[1])
-    if rm_admin == OWNER_USERNAME:
+    try:
+        rm_admin_id = int(parts[1])
+    except ValueError:
+        await msg.answer("⚠️ Укажи числовой Telegram ID.")
+        return
+    if rm_admin_id == OWNER_ID:
         await msg.answer("⚠️ Нельзя снять самого себя.")
         return
     data = load_data()
-    if rm_admin not in data["admins"]:
+    if rm_admin_id not in data["admins"]:
         await msg.answer("❌ Не является админом.")
         return
-    data["admins"].remove(rm_admin)
+    data["admins"].remove(rm_admin_id)
     save_data(data)
-    await msg.answer(f"🗑 @{rm_admin} больше не админ.")
+    await msg.answer(f"🗑 Пользователь с ID <code>{rm_admin_id}</code> больше не админ.")
 
 @router.message(Command("admins"))
 @admin_only
@@ -482,11 +495,17 @@ async def cmd_admins(msg: Message):
     data = load_data()
     text = "👑 <b>Админы бота:</b>\n\n"
     for a in data["admins"]:
-        owner_mark = " 👑 (главный)" if a == OWNER_USERNAME else ""
-        text += f"• @{a}{owner_mark}\n"
+        owner_mark = " 👑 (главный)" if a == OWNER_ID else ""
+        text += f"• <code>{a}</code>{owner_mark}\n"
     await msg.answer(text)
 
 # ═══════════════ АДМИН: ПРОЧЕЕ ═══════════════
+
+@router.message(Command("myid"))
+async def cmd_myid(msg: Message):
+    """Вспомогательная команда — узнать свой Telegram ID."""
+    uid = msg.from_user.id if msg.from_user else None
+    await msg.answer(f"🆔 Твой Telegram ID: <code>{uid}</code>")
 
 @router.message(Command("broadcast"))
 @admin_only
@@ -549,7 +568,7 @@ async def cmd_reset_all(msg: Message):
     if len(parts) < 2 or parts[1] != "ПОДТВЕРЖДАЮ":
         await msg.answer("⚠️ Это удалит ВСЕ данные!\nДля подтверждения: /reset_all ПОДТВЕРЖДАЮ")
         return
-    data = {"admins": [OWNER_USERNAME], "participants": {}}
+    data = {"admins": [OWNER_ID], "participants": {}}
     save_data(data)
     await msg.answer("💥 Все данные сброшены.")
 
@@ -627,7 +646,7 @@ async def wait_for_clear_session():
 
 async def main():
     if not DATA_PATH.exists():
-        save_data({"admins": [OWNER_USERNAME], "participants": {}})
+        save_data({"admins": [OWNER_ID], "participants": {}})
 
     # Сначала веб-сервер
     app = web.Application()

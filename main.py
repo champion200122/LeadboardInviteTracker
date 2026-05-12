@@ -12,7 +12,7 @@ from aiohttp import web
 
 # ==================== НАСТРОЙКИ ====================
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [123456789]   # ← ОБЯЗАТЕЛЬНО поменяй на свой Telegram ID
+ADMIN_IDS = [827744412]   # ← ОБЯЗАТЕЛЬНО поменяй на свой Telegram ID
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN не найден! Добавь его в Environment Variables на Render.")

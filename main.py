@@ -1,24 +1,19 @@
-# main.py
 import asyncio
-import logging
 import os
+import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Message
 import aiosqlite
 import csv
-from datetime import datetime
 
-# ================== НАСТРОЙКИ ==================
-TOKEN = os.getenv("BOT_TOKEN")  # ставь в переменные окружения на Render
-ADMIN_IDS = [827744412]  # ← твои Telegram ID
+# ==================== НАСТРОЙКИ ====================
+TOKEN = os.getenv("8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg")          # в Render: переменная BOT_TOKEN
+ADMIN_IDS = [827744412]                 # ← ВСТАВЬ СВОИ ID админов!
 
-# ================== БД ==================
 DB_NAME = "contest.db"
 
+# ==================== ИНИЦИАЛИЗАЦИЯ БД ====================
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''
@@ -27,223 +22,172 @@ async def init_db():
                 username TEXT,
                 invites INTEGER DEFAULT 0,
                 ref_link TEXT UNIQUE,
-                banned INTEGER DEFAULT 0,
-                joined_date TEXT
-            )
-        ''')
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS clubs (
-                tag TEXT PRIMARY KEY,
-                name TEXT
+                banned INTEGER DEFAULT 0
             )
         ''')
         await db.commit()
 
-# ================== БОТ ==================
+# ==================== БОТ ====================
 bot = Bot(token=TOKEN, parse_mode="HTML")
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher()
 
-# Генерация реф-ссылки
-def generate_ref(user_id: int) -> str:
-    return f"https://t.me/{(await bot.get_me()).username}?start=ref_{user_id}"
+# Генерация ссылки (админ даёт вручную — но бот может создать шаблон)
+def make_link(user_id: int) -> str:
+    return f"https://t.me/{(bot.username).replace('@','')}?start=ref_{user_id}"
 
-# ================== КОМАНДЫ ==================
+# ==================== КОМАНДЫ ====================
+
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
-    ref = None
-    
-    if message.text.startswith("/start ref_"):
-        ref = int(message.text.split("ref_")[1])
-    
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            
+        async with db.execute("SELECT invites FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
         if not row:
-            ref_link = generate_ref(user_id)
-            joined_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-            await db.execute(
-                "INSERT INTO users (user_id, username, ref_link, joined_date) VALUES (?, ?, ?, ?)",
-                (user_id, username, ref_link, joined_date)
-            )
+            # если новый — записываем с 0 инвайтами
+            await db.execute("INSERT INTO users (user_id, username) VALUES (?, ?)",
+                             (user_id, message.from_user.username or "no_name"))
             await db.commit()
-            
-            # Если пришёл по рефералке — засчитываем инвайт пригласившему
-            if ref and ref != user_id:
-                async with db.execute("SELECT banned FROM users WHERE user_id = ?", (ref,)) as cursor:
-                    inviter = await cursor.fetchone()
-                if inviter and not inviter[0]:  # не забанен
-                    await db.execute("UPDATE users SET invites = invites + 1 WHERE user_id = ?", (ref,))
-                    await db.commit()
-                    try:
-                        await bot.send_message(ref, f"🎉 Новый игрок по твоей ссылке!\n+1 инвайт ✅\nВсего: {inviter[0]+1}")
-                    except:
-                        pass
-        
+            invites = 0
         else:
-            ref_link = row[3] if len(row) > 3 else generate_ref(user_id)
-
-    keyboard = InlineKeyboardButton(text="Моя реферальная ссылка", url=ref_link)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[keyboard]])
-    
-    text = (
-        "🔥 <b>Конкурс инвайтов запущен!</b>\n\n"
-        "Приглашай друзей — главный приз PRO PASS!\n\n"
-        f"Твоя персональная ссылка 👇"
+            invites = row[0]
+    await message.answer(
+        f"🔥 Конкурс инвайтов!\nТвоих инвайтов: <b>{invites}</b>\nЖди ссылку от админа 👀"
     )
-    await message.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
     user_id = message.from_user.id
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT invites, ref_link FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-        
+        async with db.execute("SELECT invites FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
         if not row:
-            await message.answer("Ты ещё не участвуешь. Напиши /start")
+            await message.answer("Ты ещё не участвуешь. /start")
             return
-            
         invites = row[0]
-        link = row[1]
-        
+
         # Топ-10
-        async with db.execute("SELECT username, invites FROM users WHERE banned = 0 ORDER BY invites DESC LIMIT 10") as cursor:
-            top = await cursor.fetchall()
-        
-        top_text = "\n".join([f"{i+1}. @{u[0] if u[0] else 'NoName'} — {u[1]}" for i, u in enumerate(top)]) if top else "Пока пусто"
-        
-        text = (
-            f"<b>Твоя статистика:</b>\n"
-            f"Инвайтов: <b>{invites}</b>\n\n"
-            f"<b>Топ-10:</b>\n{top_text}"
-        )
-        await message.answer(text)
+        async with db.execute("SELECT username, invites FROM users WHERE banned = 0 ORDER BY invites DESC LIMIT 10") as cur:
+            top = await cur.fetchall()
+        top_text = "\n".join([f"{i+1}. @{u[0] or 'NoName'} — {u[1]}" for i, u in enumerate(top)]) if top else "Пусто"
 
-# ================== АДМИНСКИЕ КОМАНДЫ ==================
-async def is_admin(message: Message) -> bool:
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⛔ Доступ запрещён")
-        return False
-    return True
+    await message.answer(f"<b>Твои инвайты:</b> {invites}\n\n<b>Топ-10:</b>\n{top_text}")
 
-@dp.message(Command("addclub"))
-async def add_club(message: Message):
-    if not await is_admin(message): return
-    try:
-        tag = message.text.split()[1].upper()
-        name = " ".join(message.text.split()[2:])
-        if not name:
-            await message.answer("Использование: /addclub #TAG Название клуба")
-            return
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("INSERT OR REPLACE INTO clubs (tag, name) VALUES (?, ?)", (tag, name))
-            await db.commit()
-        await message.answer(f"Клуб добавлен: {tag} — {name}")
-    except:
-        await message.answer("Ошибка. Пример: /addclub #2PPPPP Клуб Чемпионов")
+# ==================== АДМИНСКИЕ КОМАНДЫ ====================
 
-@dp.message(Command("removeclub"))
-async def remove_club(message: Message):
-    if not await is_admin(message): return
-    try:
-        tag = message.text.split()[1].upper()
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("DELETE FROM clubs WHERE tag = ?", (tag,))
-            await db.commit()
-        await message.answer(f"Клуб {tag} удалён")
-    except:
-        await message.answer("Укажи тег: /removeclub #2PPPPP")
+async def is_admin(m: Message) -> bool:
+    return m.from_user.id in ADMIN_IDS
 
 @dp.message(Command("addinvite"))
 async def add_invite(message: Message):
-    if not await is_admin(message): return
+    if not await is_admin(message):
+        return
     try:
-        username = message.text.split()[1].replace("@", "")
+        user = message.text.split()[1].replace("@", "")
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET invites = invites + 1 WHERE username = ?", (username,))
+            await db.execute("UPDATE users SET invites = invites + 1 WHERE username = ?", (user,))
             if db.total_changes == 0:
                 await message.answer("Пользователь не найден")
             else:
                 await db.commit()
-                await message.answer(f"+1 инвайт для @{username}")
+                await message.answer(f"✅ +1 инвайт @{user}")
     except:
         await message.answer("Использование: /addinvite @username")
 
 @dp.message(Command("removeinvite"))
 async def remove_invite(message: Message):
-    if not await is_admin(message): return
+    if not await is_admin(message):
+        return
     try:
-        username = message.text.split()[1].replace("@", "")
+        user = message.text.split()[1].replace("@", "")
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET invites = invites - 1 WHERE username = ? AND invites > 0", (username,))
-            if db.total_changes > 0:
-                await db.commit()
-                await message.answer(f"-1 инвайт у @{username}")
-            else:
-                await message.answer("Нечего снимать или пользователь не найден")
+            await db.execute("UPDATE users SET invites = MAX(0, invites - 1) WHERE username = ?", (user,))
+            await db.commit()
+            await message.answer(f"🛑 -1 инвайт @{user}")
     except:
         await message.answer("Использование: /removeinvite @username")
 
+@dp.message(Command("givelink"))
+async def givelink_cmd(message: Message):
+    if not await is_admin(message):
+        return
+    try:
+        user = message.text.split()[1].replace("@", "")
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("SELECT user_id FROM users WHERE username = ?", (user,)) as cur:
+                row = await cur.fetchone()
+            if not row:
+                await message.answer("Пользователь не в базе")
+                return
+            user_id = row[0]
+            link = make_link(user_id)
+        await message.answer(f"🔗 Ссылка для @{user}: {link}")
+    except:
+        await message.answer("Использование: /givelink @username")
+
 @dp.message(Command("ban"))
 async def ban_user(message: Message):
-    if not await is_admin(message): return
+    if not await is_admin(message):
+        return
     try:
-        username = message.text.split()[1].replace("@", "")
+        user = message.text.split()[1].replace("@", "")
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET banned = 1 WHERE username = ?", (username,))
+            await db.execute("UPDATE users SET banned = 1 WHERE username = ?", (user,))
             await db.commit()
-        await message.answer(f"@{username} забанен")
+        await message.answer(f"🚫 @{user} забанен (инвайты не считаются)")
     except:
-        await message.answer("Ошибка")
+        await message.answer("Использование: /ban @username")
 
 @dp.message(Command("unban"))
 async def unban_user(message: Message):
-    if not await is_admin(message): return
+    if not await is_admin(message):
+        return
     try:
-        username = message.text.split()[1].replace("@", "")
+        user = message.text.split()[1].replace("@", "")
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET banned = 0 WHERE username = ?", (username,))
+            await db.execute("UPDATE users SET banned = 0 WHERE username = ?", (user,))
             await db.commit()
-        await message.answer(f"@{username} разбанен")
+        await message.answer(f"✅ @{user} разбанен")
     except:
-        await message.answer("Ошибка")
+        await message.answer("Использование: /unban @username")
 
 @dp.message(Command("top"))
 async def admin_top(message: Message):
-    if not await is_admin(message): return
+    if not await is_admin(message):
+        return
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT username, invites, joined_date FROM users WHERE banned = 0 ORDER BY invites DESC") as cursor:
-            rows = await cursor.fetchall()
-    
-    text = "<b>Полный топ участников:</b>\n\n"
-    for i, row in enumerate(rows):
-        text += f"{i+1}. @{row[0] or 'NoName'} — {row[1]} инвайтов (с {row[2]})\n"
-    
-    await message.answer(text or "Пусто")
+        async with db.execute("SELECT username, invites FROM users WHERE banned = 0 ORDER BY invites DESC") as cur:
+            rows = await cur.fetchall()
+    text = "<b>Топ участников:</b>\n" + "\n".join([f"{i+1}. @{u[0] or 'NoName'} — {u[1]}" for i, u in enumerate(rows)])
+    await message.answer(text or "Нет активных участников")
 
 @dp.message(Command("export"))
 async def export_csv(message: Message):
-    if not await is_admin(message): return
+    if not await is_admin(message):
+        return
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT user_id, username, invites, joined_date, banned FROM users ORDER BY invites DESC") as cursor:
-            rows = await cursor.fetchall()
-    
+        async with db.execute("SELECT user_id, username, invites, banned FROM users ORDER BY invites DESC") as cur:
+            rows = await cur.fetchall()
     with open("export.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["ID", "Username", "Invites", "Joined", "Banned"])
-        writer.writerows(rows)
-    
-    await message.answer_document(types.FSInputFile("export.csv"), caption="Экспорт участников")
+        csv.writer(f).writerows(rows)
+    await message.answer_document(types.FSInputFile("export.csv"), caption="Экспорт таблицы")
 
-# ================== ЗАПУСК ==================
-async def main():
+# ==================== ЗАПУСК ДЛЯ RENDER ====================
+# Фейковый веб-сервер, чтобы Render не убивал бота
+from aiohttp import web
+import asyncio
+
+async def ping(request):
+    return web.Response(text="OK")
+
+async def on_startup(app):
     await init_db()
-    await dp.start_polling(bot)
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+app = web.Application()
+app.on_startup.append(on_startup)
+app.router.add_get('/', ping)
+
+async def main():
+    # запускаем бота
+    asyncio.create_task(dp.start_polling(bot))
+    # запускаем веб-сервер на порту Render

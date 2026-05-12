@@ -14,7 +14,7 @@ from datetime import datetime
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = os.getenv("BOT_TOKEN")  # ставь в переменные окружения на Render
-ADMIN_IDS = [123456789, 987654321]  # ← твои Telegram ID
+ADMIN_IDS = [827744412]  # ← твои Telegram ID
 
 # ================== БД ==================
 DB_NAME = "contest.db"

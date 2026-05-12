@@ -9,19 +9,23 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
-from aiogram.client.default import DefaultBotProperties # <-- ОЧЕНЬ ВАЖНО: Добавляем этот импорт
+from aiogram.client.default import DefaultBotProperties
 import aiosqlite
 
 # ================== НАСТРОЙКИ ==================
-# Токен и ID админов берутся из переменных Render
-TOKEN = os.getenv("8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg")
-ADMIN_IDS_STR = os.getenv("827744412")
-ADMIN_IDS = set(int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit())
+# ВНИМАНИЕ: ТОКЕН И ID АДМИНОВ ЗАШИТЫ В КОД!
+# МЕНЯЙТЕ ИХ ЗДЕСЬ НА СВОИ!
+# Если ваш репозиторий публичный, эти данные будут видны всем.
 
-if not TOKEN:
-    print("❌ ОШИБКА: BOT_TOKEN не задан в Environment Variables на Render!")
-    sys.exit(1)
+# === ВАШ ТОКЕН БОТА ОТ @BotFather ===
+TOKEN = "8248125855:AAHjxfoCvTXhVh7xdesTXLBiw5ABcQE3uQg" # <--- ВСТАВЬ СЮДА СВОЙ ТОКЕН!
 
+# === ВАШИ TELEGRAM ID ===
+# Если админов несколько, указывайте через запятую: ADMIN_IDS = {123456789, 987654321}
+ADMIN_IDS = {827744412} # <--- ВСТАВЬ СЮДА СВОЙ ID АДМИНА!
+
+
+# ================== Инициализация Логгирования и Бота ==================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # <-- ИСПРАВЛЕНИЕ: Используем DefaultBotProperties для parse_mode
@@ -83,7 +87,7 @@ async def get_or_create_user(user_id: int, username: str):
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
+    username = message.from_user.username or f"id{user_id}" # Если нет юзернейма, используем id
     
     user_data = await get_or_create_user(user_id, username)
     
@@ -106,7 +110,7 @@ async def cmd_start(message: Message):
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
+    username = message.from_user.username or f"id{user_id}"
     
     user_data = await get_or_create_user(user_id, username) # Получаем актуальные данные
     
@@ -237,11 +241,9 @@ async def cmd_addinvite(message: Message):
             except Exception as e:
                 logging.warning(f"Не удалось отправить уведомление пользователю {target_user_id}: {e}")
 
-    except IndexError:
-        await message.answer("Использование: /addinvite @username [кол-во]")
-    except Exception as e:
+    except Exception as e: # Общая ошибка для Index/Value/других
         logging.error(f"Ошибка в /addinvite: {e}")
-        await message.answer(f"Произошла ошибка: {e}")
+        await message.answer(f"Произошла ошибка при добавлении инвайтов. Проверьте формат команды.")
 
 @dp.message(Command("removeinvite"))
 async def cmd_removeinvite(message: Message):
@@ -289,11 +291,9 @@ async def cmd_removeinvite(message: Message):
             except Exception as e:
                 logging.warning(f"Не удалось отправить уведомление пользователю {target_user_id}: {e}")
 
-    except IndexError:
-        await message.answer("Использование: /removeinvite @username [кол-во]")
     except Exception as e:
         logging.error(f"Ошибка в /removeinvite: {e}")
-        await message.answer(f"Произошла ошибка: {e}")
+        await message.answer(f"Произошла ошибка при отнимании инвайтов. Проверьте формат команды.")
 
 @dp.message(Command("setinvite"))
 async def cmd_setinvite(message: Message):
@@ -318,11 +318,13 @@ async def cmd_setinvite(message: Message):
         
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT user_id FROM users WHERE username = ?", (target_username,)) as cursor:
-                target_user_id = await cursor.fetchone()
+                target_user_id_data = await cursor.fetchone() # Изменил имя переменной
             
-            if not target_user_id:
+            if not target_user_id_data:
                 await message.answer(f"❌ Пользователь @{target_username} не найден.")
                 return
+            
+            target_user_id = target_user_id_data[0] # Получаем сам ID
             
             await db.execute("UPDATE users SET invites = ? WHERE username = ?", (amount, target_username))
             await db.commit()
@@ -331,15 +333,13 @@ async def cmd_setinvite(message: Message):
             
             # Уведомление пользователя
             try:
-                await bot.send_message(target_user_id[0], f"🔧 Администратор установил тебе {amount} инвайтов. Всего: {amount}")
+                await bot.send_message(target_user_id, f"🔧 Администратор установил тебе {amount} инвайтов. Всего: {amount}")
             except Exception as e:
-                logging.warning(f"Не удалось отправить уведомление пользователю {target_user_id[0]}: {e}")
+                logging.warning(f"Не удалось отправить уведомление пользователю {target_user_id}: {e}")
 
-    except IndexError:
-        await message.answer("Использование: /setinvite @username <точное кол-во>")
     except Exception as e:
         logging.error(f"Ошибка в /setinvite: {e}")
-        await message.answer(f"Произошла ошибка: {e}")
+        await message.answer(f"Произошла ошибка при установке инвайтов. Проверьте формат команды.")
 
 @dp.message(Command("ban"))
 async def cmd_ban(message: Message):
@@ -355,23 +355,25 @@ async def cmd_ban(message: Message):
         
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT user_id FROM users WHERE username = ?", (target_username,)) as cursor:
-                target_user_id = await cursor.fetchone()
-            if not target_user_id:
+                target_user_id_data = await cursor.fetchone()
+            if not target_user_id_data:
                 await message.answer(f"❌ Пользователь @{target_username} не найден.")
                 return
+            
+            target_user_id = target_user_id_data[0]
             
             await db.execute("UPDATE users SET banned = 1 WHERE username = ?", (target_username,))
             await db.commit()
         await message.answer(f"⛔ @{target_username} забанен. Он больше не сможет пользоваться ботом.")
         # Уведомление пользователя
         try:
-            await bot.send_message(target_user_id[0], "⛔ Вы были забанены администрацией и больше не можете пользоваться ботом.")
+            await bot.send_message(target_user_id, "⛔ Вы были забанены администрацией и больше не можете пользоваться ботом.")
         except Exception as e:
-            logging.warning(f"Не удалось отправить уведомление забаненному пользователю {target_user_id[0]}: {e}")
+            logging.warning(f"Не удалось отправить уведомление забаненному пользователю {target_user_id}: {e}")
 
     except Exception as e:
         logging.error(f"Ошибка в /ban: {e}")
-        await message.answer(f"Произошла ошибка: {e}")
+        await message.answer(f"Произошла ошибка при бане. Проверьте формат команды.")
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: Message):
@@ -387,23 +389,25 @@ async def cmd_unban(message: Message):
         
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute("SELECT user_id FROM users WHERE username = ?", (target_username,)) as cursor:
-                target_user_id = await cursor.fetchone()
-            if not target_user_id:
+                target_user_id_data = await cursor.fetchone()
+            if not target_user_id_data:
                 await message.answer(f"❌ Пользователь @{target_username} не найден.")
                 return
+            
+            target_user_id = target_user_id_data[0]
             
             await db.execute("UPDATE users SET banned = 0 WHERE username = ?", (target_username,))
             await db.commit()
         await message.answer(f"✅ @{target_username} разбанен. Теперь он снова может пользоваться ботом.")
         # Уведомление пользователя
         try:
-            await bot.send_message(target_user_id[0], "✅ Вы были разбанены администрацией и снова можете пользоваться ботом.")
+            await bot.send_message(target_user_id, "✅ Вы были разбанены администрацией и снова можете пользоваться ботом.")
         except Exception as e:
-            logging.warning(f"Не удалось отправить уведомление разбаненному пользователю {target_user_id[0]}: {e}")
+            logging.warning(f"Не удалось отправить уведомление разбаненному пользователю {target_user_id}: {e}")
 
     except Exception as e:
         logging.error(f"Ошибка в /unban: {e}")
-        await message.answer(f"Произошла ошибка: {e}")
+        await message.answer(f"Произошла ошибка при разбане. Проверьте формат команды.")
 
 
 @dp.message(Command("export"))

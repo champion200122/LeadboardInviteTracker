@@ -1,3 +1,2 @@
-aiogram==3.13.1
-aiosqlite
-aiohttp
+aiogram>=3.15
+aiohttp>=3.9

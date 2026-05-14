@@ -9,6 +9,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import aiohttp
+from aiohttp import ClientSession
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
@@ -43,8 +45,7 @@ log = logging.getLogger("invite_bot_clean")
 # ──────────────────── SIGTERM ────────────────────
 def handle_sigterm(signum, frame):
     log.info("Получен сигнал завершения, выхожу.")
-    os_exit = getattr(sys, "exit")
-    os_exit(0)
+    sys.exit(0)
 
 
 signal.signal(signal.SIGTERM, handle_sigterm)
@@ -429,7 +430,6 @@ def require_username(func):
     return wrapper
 
 
-
 def admin_only(func):
     @functools.wraps(func)
     async def wrapper(msg: Message, *args, **kwargs):
@@ -439,7 +439,6 @@ def admin_only(func):
         return await func(msg, *args, **kwargs)
 
     return wrapper
-
 
 
 def owner_only(func):
@@ -979,14 +978,80 @@ async def auto_register_from_group(msg: Message):
         log.info(f"Автодобавлен участник из группы: @{uname}")
 
 
+# ──────────────────── ЗАЩИТА ОТ ДВУХ ИНСТАНСОВ ────────────────────
+def is_conflict_error(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        "Conflict" in text
+        or "terminated by other getUpdates request" in text
+        or "can't use getUpdates method while webhook is active" in text
+    )
+
+
+async def wait_for_clear_session():
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+    async with ClientSession() as session:
+        try:
+            await session.post(
+                f"{url}/deleteWebhook",
+                json={"drop_pending_updates": False}
+            )
+        except Exception as e:
+            log.warning(f"Не удалось удалить webhook перед стартом: {e}")
+
+        for attempt in range(20):
+            try:
+                async with session.post(
+                    f"{url}/getUpdates",
+                    json={"timeout": 1, "offset": -1},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    result = await resp.json()
+
+                    if result.get("ok"):
+                        log.info(f"Сессия Telegram свободна, попытка {attempt + 1}.")
+                        return
+
+                    desc = result.get("description", "")
+                    if "Conflict" in desc:
+                        log.warning(
+                            f"Другой инстанс ещё жив. Попытка {attempt + 1}/20, жду 3 сек..."
+                        )
+                    else:
+                        log.warning(f"Проблема при проверке сессии: {desc}")
+
+            except Exception as e:
+                log.warning(f"Ошибка проверки сессии, попытка {attempt + 1}: {e}")
+
+            await asyncio.sleep(3)
+
+    log.warning("Не дождались освобождения сессии за 60 секунд, пробую запускаться дальше.")
+
+
 # ──────────────────── ЗАПУСК ────────────────────
 async def main():
     init_db()
     log.info("База инициализирована.")
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    log.info("Запускаю polling...")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    while True:
+        try:
+            await wait_for_clear_session()
+            await bot.delete_webhook(drop_pending_updates=True)
+            log.info("Запускаю polling...")
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            break
+
+        except Exception as e:
+            if is_conflict_error(e):
+                log.warning(
+                    "Обнаружен второй инстанс бота или конфликт getUpdates. "
+                    "Жду 5 секунд и пробую снова..."
+                )
+                await asyncio.sleep(5)
+                continue
+
+            raise
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 import asyncio
+import atexit
 import functools
 import html
 import json
 import logging
+import os
 import signal
 import sqlite3
 import sys
@@ -21,10 +23,11 @@ from aiogram.types import BufferedInputFile, Message
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
 DB_PATH = BASE_DIR / "bot.sqlite3"
+PID_PATH = BASE_DIR / "bot.pid"
 
 if not CONFIG_PATH.exists():
     raise FileNotFoundError(
-        "Не найден config.json. Скопируй config.example.json в config.json и заполни его."
+        "Не найден config.json. Создай его рядом с ботом."
     )
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -43,13 +46,25 @@ log = logging.getLogger("invite_bot_clean")
 
 
 # ──────────────────── SIGTERM ────────────────────
+def remove_pid_file():
+    try:
+        if PID_PATH.exists():
+            content = PID_PATH.read_text(encoding="utf-8").strip()
+            if content == str(os.getpid()):
+                PID_PATH.unlink()
+    except Exception:
+        pass
+
+
 def handle_sigterm(signum, frame):
     log.info("Получен сигнал завершения, выхожу.")
-    sys.exit(0)
+    remove_pid_file()
+    raise SystemExit(0)
 
 
 signal.signal(signal.SIGTERM, handle_sigterm)
 signal.signal(signal.SIGINT, handle_sigterm)
+atexit.register(remove_pid_file)
 
 
 # ──────────────────── ВСПОМОГАТЕЛЬНЫЕ ────────────────────
@@ -73,12 +88,6 @@ def caller_id(msg: Message) -> int | None:
     return msg.from_user.id if msg.from_user else None
 
 
-def caller_username(msg: Message) -> str | None:
-    if msg.from_user and msg.from_user.username:
-        return normalize_username(msg.from_user.username)
-    return None
-
-
 def participant_title(username: str, display_name: str | None, bold: bool = False) -> str:
     username = normalize_username(username)
     display_name = (display_name or "").strip()
@@ -89,6 +98,123 @@ def participant_title(username: str, display_name: str | None, bold: bool = Fals
         text = f"@{h(username)}"
 
     return f"<b>{text}</b>" if bold else text
+
+
+# ──────────────────── PID / ОДИН ПРОЦЕСС НА СЕРВЕРЕ ────────────────────
+def read_pid_file() -> int | None:
+    if not PID_PATH.exists():
+        return None
+
+    try:
+        content = PID_PATH.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        return int(content)
+    except Exception:
+        return None
+
+
+def write_pid_file(pid: int):
+    PID_PATH.write_text(str(pid), encoding="utf-8")
+
+
+def process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def get_process_cmdline(pid: int) -> str:
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if not proc_cmdline.exists():
+        return ""
+
+    try:
+        raw = proc_cmdline.read_bytes()
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+def looks_like_our_old_process(pid: int) -> bool:
+    """
+    Пытаемся убедиться, что PID из pid-файла действительно относится к этому же скрипту.
+    Работает нормально на Linux через /proc.
+    """
+    cmdline = get_process_cmdline(pid)
+    if not cmdline:
+        return False
+
+    script_name = Path(__file__).name
+    return script_name in cmdline
+
+
+async def kill_previous_instance_if_needed():
+    current_pid = os.getpid()
+    old_pid = read_pid_file()
+
+    if not old_pid:
+        write_pid_file(current_pid)
+        return
+
+    if old_pid == current_pid:
+        write_pid_file(current_pid)
+        return
+
+    if not process_exists(old_pid):
+        log.info("Найден старый PID-файл, но процесса уже нет.")
+        write_pid_file(current_pid)
+        return
+
+    if not looks_like_our_old_process(old_pid):
+        log.warning(
+            f"В pid-файле найден PID {old_pid}, но это не похоже на текущий бот. "
+            f"Авто-убийство пропускаю."
+        )
+        write_pid_file(current_pid)
+        return
+
+    log.warning(f"Найден предыдущий экземпляр бота (PID={old_pid}). Пытаюсь завершить его...")
+
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+    except ProcessLookupError:
+        log.info("Старый процесс уже исчез.")
+        write_pid_file(current_pid)
+        return
+    except Exception as e:
+        raise RuntimeError(f"Не удалось отправить SIGTERM старому процессу {old_pid}: {e}")
+
+    for _ in range(30):
+        if not process_exists(old_pid):
+            log.info(f"Старый процесс {old_pid} завершён через SIGTERM.")
+            write_pid_file(current_pid)
+            return
+        await asyncio.sleep(0.5)
+
+    log.warning(f"Процесс {old_pid} не завершился после SIGTERM. Пытаюсь SIGKILL...")
+
+    try:
+        os.kill(old_pid, signal.SIGKILL)
+    except ProcessLookupError:
+        log.info("Старый процесс уже исчез перед SIGKILL.")
+        write_pid_file(current_pid)
+        return
+    except Exception as e:
+        raise RuntimeError(f"Не удалось отправить SIGKILL старому процессу {old_pid}: {e}")
+
+    for _ in range(20):
+        if not process_exists(old_pid):
+            log.info(f"Старый процесс {old_pid} завершён через SIGKILL.")
+            write_pid_file(current_pid)
+            return
+        await asyncio.sleep(0.25)
+
+    raise RuntimeError(
+        f"Не удалось завершить предыдущий экземпляр бота (PID={old_pid})."
+    )
 
 
 # ──────────────────── БАЗА ────────────────────
@@ -151,6 +277,7 @@ def init_db():
             "INSERT OR IGNORE INTO admins (user_id) VALUES (?)",
             (OWNER_ID,),
         )
+
         conn.execute(
             """
             INSERT OR IGNORE INTO contest_state (id, active, chat_id, started_at)
@@ -178,6 +305,7 @@ def db_get_admins() -> list[int]:
         rows = conn.execute(
             "SELECT user_id FROM admins ORDER BY user_id"
         ).fetchall()
+
     ids = [int(r["user_id"]) for r in rows]
     if OWNER_ID not in ids:
         ids.insert(0, OWNER_ID)
@@ -252,6 +380,7 @@ def db_ensure_participant(username: str, display_name: str | None = None, tg_id:
                 """,
                 (new_name, new_tg_id, uname),
             )
+
         return False, db_get_participant(uname)
 
     db_create_participant(uname, display_name=display_name or uname, tg_id=tg_id)
@@ -318,6 +447,7 @@ def db_get_invites(username: str) -> list[dict]:
             """,
             (uname,),
         ).fetchall()
+
     return [dict(r) for r in rows]
 
 
@@ -332,6 +462,7 @@ def db_count_valid_invites(username: str) -> int:
             """,
             (uname,),
         ).fetchone()
+
     return int(row["cnt"] if row else 0)
 
 
@@ -381,6 +512,7 @@ def db_get_contest_state() -> dict:
         row = conn.execute(
             "SELECT active, chat_id, started_at FROM contest_state WHERE id = 1"
         ).fetchone()
+
     if not row:
         return {"active": 0, "chat_id": None, "started_at": None}
     return dict(row)
@@ -978,7 +1110,7 @@ async def auto_register_from_group(msg: Message):
         log.info(f"Автодобавлен участник из группы: @{uname}")
 
 
-# ──────────────────── ЗАЩИТА ОТ ДВУХ ИНСТАНСОВ ────────────────────
+# ──────────────────── TELEGRAM CONFLICT GUARD ────────────────────
 def is_conflict_error(exc: Exception) -> bool:
     text = str(exc)
     return (
@@ -1030,9 +1162,19 @@ async def wait_for_clear_session():
 
 
 # ──────────────────── ЗАПУСК ────────────────────
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+dp.include_router(router)
+
+
 async def main():
     init_db()
     log.info("База инициализирована.")
+
+    # Убиваем предыдущий локальный процесс этого же бота, если он есть
+    await kill_previous_instance_if_needed()
+    write_pid_file(os.getpid())
+    log.info(f"Текущий PID: {os.getpid()}")
 
     while True:
         try:
